@@ -1,6 +1,6 @@
-﻿using System.Text.Json;
-using LogForge.Api.Contracts.Common;
+﻿using LogForge.Api.Contracts.Common;
 using LogForge.Domain.Ingestion;
+using System.Text.Json;
 
 namespace LogForge.Api.Contracts.Ingestion;
 
