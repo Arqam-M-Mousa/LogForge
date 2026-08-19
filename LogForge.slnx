@@ -4,4 +4,5 @@
   </Project>
   <Project Path="LogForge.API/LogForge.API.csproj" />
   <Project Path="LogForge.Domain/LogForge.Domain.csproj" />
+  <Project Path="LogForge.Infrastructure/LogForge.Infrastructure.csproj" />
 </Solution>
