@@ -7,6 +7,7 @@ using LogForge.Infrastructure.Ingestion;
 using LogForge.Infrastructure.Ingestion.WriterChannel;
 using LogForge.Infrastructure.Persistence;
 using LogForge.Infrastructure.Query;
+using LogForge.Infrastructure.Retention;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -24,6 +25,7 @@ public static class DependencyInjection
         services.AddLogQuery();
         services.AddLogIngestion(configuration);
         services.AddLogAggregation(configuration);
+        services.AddLogRetention(configuration);
         services.AddHealthChecks().AddDbContextCheck<LogForgeDbContext>();
 
         return services;
@@ -93,6 +95,18 @@ public static class DependencyInjection
 
         services.AddSingleton<AggregateResultCache>();
         services.AddScoped<ILogAggregationService, RollupLogAggregationService>();
+
+        return services;
+    }
+
+    private static IServiceCollection AddLogRetention(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.Configure<RetentionOptions>(options =>
+            configuration.GetSection(RetentionOptions.SectionName).Bind(options));
+
+        services.AddHostedService<LogRetentionService>();
 
         return services;
     }
