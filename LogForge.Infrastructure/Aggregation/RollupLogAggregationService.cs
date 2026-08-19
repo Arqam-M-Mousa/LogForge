@@ -44,21 +44,21 @@ public sealed class RollupLogAggregationService : ILogAggregationService
     {
         var groupColumn = filter.GroupBy switch
         {
-            "service" => "service",
-            "level" => "level",
+            "service" => "\"Service\"",
+            "level" => "\"Level\"",
             _ => null
         };
 
         var sql = new StringBuilder(
-            "SELECT date_bin(@bucket::interval, bucket_start, '2000-01-01T00:00:00Z'::timestamptz) AS start, ");
-        sql.Append(groupColumn ?? "NULL::text").Append(" AS group, SUM(log_count) AS count ")
+            "SELECT date_bin(@bucket::interval, \"BucketStart\", '2000-01-01T00:00:00Z'::timestamptz) AS start, ");
+        sql.Append(groupColumn ?? "NULL::text").Append(" AS group, SUM(\"LogCount\")::bigint AS count ")
            .Append("FROM log_minute_rollup ")
-           .Append("WHERE bucket_start >= date_bin('1 minute'::interval, @since, '2000-01-01T00:00:00Z'::timestamptz) ")
-           .Append("AND bucket_start < date_bin('1 minute'::interval, @until, '2000-01-01T00:00:00Z'::timestamptz) + interval '1 minute'");
+           .Append("WHERE \"BucketStart\" >= date_bin('1 minute'::interval, @since, '2000-01-01T00:00:00Z'::timestamptz) ")
+           .Append("AND \"BucketStart\" < date_bin('1 minute'::interval, @until, '2000-01-01T00:00:00Z'::timestamptz) + interval '1 minute'");
 
         var parameters = new List<NpgsqlParameter>
         {
-            new("bucket", NpgsqlDbType.Varchar) { Value = filter.Bucket },
+            new("bucket", NpgsqlDbType.Varchar) { Value = ToPostgresInterval(filter.Bucket) },
             new("since", NpgsqlDbType.TimestampTz) { Value = filter.Since },
             new("until", NpgsqlDbType.TimestampTz) { Value = filter.Until }
         };
@@ -69,14 +69,14 @@ public sealed class RollupLogAggregationService : ILogAggregationService
         if (!string.IsNullOrWhiteSpace(filter.Service))
         {
             var name = NextParamName();
-            sql.Append(" AND service = @").Append(name);
+            sql.Append(" AND \"Service\" = @").Append(name);
             parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Varchar) { Value = filter.Service });
         }
 
         if (!string.IsNullOrWhiteSpace(filter.Level))
         {
             var name = NextParamName();
-            sql.Append(" AND level = @").Append(name);
+            sql.Append(" AND \"Level\" = @").Append(name);
             parameters.Add(new NpgsqlParameter(name, NpgsqlDbType.Varchar) { Value = filter.Level });
         }
 
@@ -105,7 +105,7 @@ public sealed class RollupLogAggregationService : ILogAggregationService
 
         var parameters = new List<NpgsqlParameter>
         {
-            new("bucket", NpgsqlDbType.Varchar) { Value = filter.Bucket },
+            new("bucket", NpgsqlDbType.Varchar) { Value = ToPostgresInterval(filter.Bucket) },
             new("since", NpgsqlDbType.TimestampTz) { Value = filter.Since },
             new("until", NpgsqlDbType.TimestampTz) { Value = filter.Until }
         };
@@ -181,4 +181,13 @@ public sealed class RollupLogAggregationService : ILogAggregationService
 
         return new LogAggregationResult(buckets);
     }
+
+    private static string ToPostgresInterval(string bucket) => bucket switch
+    {
+        "1m" => "1 minute",
+        "5m" => "5 minutes",
+        "1h" => "1 hour",
+        "1d" => "1 day",
+        _ => throw new ArgumentOutOfRangeException(nameof(bucket), bucket, "Unsupported aggregation bucket")
+    };
 }
