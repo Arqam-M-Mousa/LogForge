@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using NpgsqlTypes;
+using System.Globalization;
 
 namespace LogForge.Infrastructure.Retention;
 
@@ -10,7 +11,7 @@ public sealed class LogRetentionService : BackgroundService
 {
     private const string DeleteExpiredRollupsSql = """
         DELETE FROM log_minute_rollup
-        WHERE bucket_start < date_bin('1 minute'::interval, @cutoff, '2000-01-01T00:00:00Z'::timestamptz)
+        WHERE "BucketStart" < date_bin('1 minute'::interval, @cutoff, '2000-01-01T00:00:00Z'::timestamptz)
         """;
 
     private const string DeleteExpiredLogsSql = """
@@ -85,6 +86,8 @@ public sealed class LogRetentionService : BackgroundService
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
+        var droppedPartitions = await DropExpiredPartitionsAsync(connection, transaction, cutoff, cancellationToken);
+
         await using (var rollupCommand = new NpgsqlCommand(DeleteExpiredRollupsSql, connection, transaction))
         {
             rollupCommand.Parameters.Add(new NpgsqlParameter("cutoff", NpgsqlDbType.TimestampTz) { Value = cutoff });
@@ -107,7 +110,43 @@ public sealed class LogRetentionService : BackgroundService
         await transaction.CommitAsync(cancellationToken);
 
         _logger.LogInformation(
-            "Retention: deleted {RollupRows} rollup rows and {LogRows} logs older than {Cutoff:O}",
-            deletedRollups, deletedLogs, cutoff);
+            "Retention: dropped {Partitions} partitions and deleted {RollupRows} rollup rows and {LogRows} logs older than {Cutoff:O}",
+            droppedPartitions, deletedRollups, deletedLogs, cutoff);
+    }
+
+    private static async Task<int> DropExpiredPartitionsAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        DateTimeOffset cutoff,
+        CancellationToken cancellationToken)
+    {
+        const string listSql = """
+            SELECT child.relname
+            FROM pg_inherits
+            JOIN pg_class parent ON parent.oid = pg_inherits.inhparent
+            JOIN pg_class child ON child.oid = pg_inherits.inhrelid
+            WHERE parent.relname = 'log' AND child.relname LIKE 'log________'
+            """;
+
+        var names = new List<string>();
+        await using (var listCommand = new NpgsqlCommand(listSql, connection, transaction))
+        await using (var reader = await listCommand.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var name = reader.GetString(0);
+                if (DateTime.TryParseExact(name.AsSpan(4), "yyyyMMdd", CultureInfo.InvariantCulture,
+                        DateTimeStyles.None, out var day) && day.AddDays(1) <= cutoff.UtcDateTime.Date)
+                    names.Add(name);
+            }
+        }
+
+        foreach (var name in names)
+        {
+            await using var dropCommand = new NpgsqlCommand($"DROP TABLE IF EXISTS \"{name}\"", connection, transaction);
+            await dropCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        return names.Count;
     }
 }

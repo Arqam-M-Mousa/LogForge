@@ -10,7 +10,7 @@ public class LogConfiguration : IEntityTypeConfiguration<Log>
     {
         builder.ToTable("log");
 
-        builder.HasKey(x => x.Id);
+        builder.HasKey(x => new { x.Timestamp, x.Id });
 
         builder.Property(x => x.Id)
             .ValueGeneratedOnAdd();
@@ -29,7 +29,9 @@ public class LogConfiguration : IEntityTypeConfiguration<Log>
             .IsRequired();
 
         builder.Property(x => x.Attributes)
-            .HasColumnType("jsonb");
+            .HasColumnType("jsonb")
+            .HasDefaultValueSql("'{}'::jsonb")
+            .IsRequired();
 
         builder.HasIndex(x => new { x.Timestamp, x.Id })
             .IsDescending();

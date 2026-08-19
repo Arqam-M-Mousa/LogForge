@@ -31,7 +31,7 @@ public sealed class RollupLogAggregationService : ILogAggregationService
         return _cache.GetOrAddAsync(
             filter,
             () => UsesRawLogs(filter)
-                ? ExecuteRawLogsAsync(filter, cancellationToken)
+                ? ExecuteRawAsync(filter, cancellationToken)
                 : ExecuteRollupAsync(filter, cancellationToken));
     }
 
@@ -84,10 +84,10 @@ public sealed class RollupLogAggregationService : ILogAggregationService
         if (groupColumn is not null)
             sql.Append(", 2");
 
-        return await ExecuteAsync(sql.ToString(), parameters, cancellationToken);
+        return await ExecuteCommandAsync(sql.ToString(), parameters, cancellationToken);
     }
 
-    private async Task<LogAggregationResult> ExecuteRawLogsAsync(
+    private async Task<LogAggregationResult> ExecuteRawAsync(
         LogAggregationFilter filter,
         CancellationToken cancellationToken)
     {
@@ -99,13 +99,14 @@ public sealed class RollupLogAggregationService : ILogAggregationService
         };
 
         var sql = new StringBuilder(
-            "SELECT date_bin(@bucket::interval, \"Timestamp\", '2000-01-01T00:00:00Z'::timestamptz) AS start, ");
+            "SELECT to_timestamp(floor(extract(epoch FROM (\"Timestamp\" - @since)) / @bucketSeconds) * @bucketSeconds) + @since AS start, ");
         sql.Append(groupColumn ?? "NULL::text").Append(" AS group, COUNT(*) AS count ")
-           .Append("FROM log WHERE \"Timestamp\" >= @since AND \"Timestamp\" < @until");
+           .Append("FROM log ")
+           .Append("WHERE \"Timestamp\" >= @since AND \"Timestamp\" < @until");
 
         var parameters = new List<NpgsqlParameter>
         {
-            new("bucket", NpgsqlDbType.Varchar) { Value = ToPostgresInterval(filter.Bucket) },
+            new("bucketSeconds", NpgsqlDbType.Double) { Value = BucketSeconds(filter.Bucket) },
             new("since", NpgsqlDbType.TimestampTz) { Value = filter.Since },
             new("until", NpgsqlDbType.TimestampTz) { Value = filter.Until }
         };
@@ -138,7 +139,7 @@ public sealed class RollupLogAggregationService : ILogAggregationService
         {
             var keyName = NextParamName();
             var valueName = NextParamName();
-            sql.Append(" AND \"Attributes\" ->> @").Append(keyName).Append(" = @").Append(valueName);
+            sql.Append(" AND \"Attributes\" @> jsonb_build_object(@").Append(keyName).Append(", @").Append(valueName).Append(")");
             parameters.Add(new NpgsqlParameter(keyName, NpgsqlDbType.Varchar) { Value = key });
             parameters.Add(new NpgsqlParameter(valueName, NpgsqlDbType.Varchar) { Value = value });
         }
@@ -147,10 +148,10 @@ public sealed class RollupLogAggregationService : ILogAggregationService
         if (groupColumn is not null)
             sql.Append(", 2");
 
-        return await ExecuteAsync(sql.ToString(), parameters, cancellationToken);
+        return await ExecuteCommandAsync(sql.ToString(), parameters, cancellationToken);
     }
 
-    private async Task<LogAggregationResult> ExecuteAsync(
+    private async Task<LogAggregationResult> ExecuteCommandAsync(
         string sql,
         List<NpgsqlParameter> parameters,
         CancellationToken cancellationToken)
@@ -181,6 +182,15 @@ public sealed class RollupLogAggregationService : ILogAggregationService
 
         return new LogAggregationResult(buckets);
     }
+
+    private static double BucketSeconds(string bucket) => bucket switch
+    {
+        "1m" => 60,
+        "5m" => 300,
+        "1h" => 3600,
+        "1d" => 86400,
+        _ => throw new ArgumentOutOfRangeException(nameof(bucket), bucket, "Unsupported aggregation bucket")
+    };
 
     private static string ToPostgresInterval(string bucket) => bucket switch
     {

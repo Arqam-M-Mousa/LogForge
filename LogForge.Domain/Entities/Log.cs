@@ -7,5 +7,5 @@ public class Log
     public string Level { get; set; } = null!;
     public string Service { get; set; } = null!;
     public string Message { get; set; } = null!;
-    public Dictionary<string, object>? Attributes { get; set; }
+    public Dictionary<string, object> Attributes { get; set; } = [];
 }

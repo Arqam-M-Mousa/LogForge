@@ -8,12 +8,12 @@ namespace LogForge.Infrastructure.Ingestion;
 public sealed class NpgsqlLogBulkWriter
 {
     private const string RollupUpsertSql = """
-        INSERT INTO log_minute_rollup (bucket_start, service, level, log_count)
+        INSERT INTO log_minute_rollup ("BucketStart", "Service", "Level", "LogCount")
         SELECT date_bin('1 minute'::interval, t, '2000-01-01T00:00:00Z'::timestamptz), s, l, COUNT(*)
         FROM unnest(@timestamps, @services, @levels) AS source(t, s, l)
         GROUP BY 1, 2, 3
-        ON CONFLICT (bucket_start, service, level)
-        DO UPDATE SET log_count = log_minute_rollup.log_count + EXCLUDED.log_count;
+        ON CONFLICT ("BucketStart", "Service", "Level")
+        DO UPDATE SET "LogCount" = log_minute_rollup."LogCount" + EXCLUDED."LogCount";
         """;
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = false };
@@ -58,15 +58,8 @@ public sealed class NpgsqlLogBulkWriter
                 await writer.WriteAsync(log.Service, NpgsqlDbType.Varchar, cancellationToken);
                 await writer.WriteAsync(log.Message, NpgsqlDbType.Varchar, cancellationToken);
 
-                if (log.Attributes is null || log.Attributes.Count == 0)
-                {
-                    await writer.WriteNullAsync(cancellationToken);
-                }
-                else
-                {
-                    var payload = JsonSerializer.SerializeToUtf8Bytes(log.Attributes, JsonOptions);
-                    await writer.WriteAsync(payload, NpgsqlDbType.Jsonb, cancellationToken);
-                }
+                var payload = JsonSerializer.SerializeToUtf8Bytes(log.Attributes, JsonOptions);
+                await writer.WriteAsync(payload, NpgsqlDbType.Jsonb, cancellationToken);
             }
 
             await writer.CompleteAsync(cancellationToken);

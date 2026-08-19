@@ -69,7 +69,7 @@ public sealed class NpgsqlLogQueryService : ILogQueryService
             var keyName = NextParamName();
             var valueName = NextParamName();
 
-            sql.Append(" AND \"Attributes\" ->> @").Append(keyName).Append(" = @").Append(valueName);
+            sql.Append(" AND \"Attributes\" @> jsonb_build_object(@").Append(keyName).Append(", @").Append(valueName).Append(")");
 
             parameters.Add(new NpgsqlParameter(keyName, NpgsqlDbType.Varchar) { Value = key });
             parameters.Add(new NpgsqlParameter(valueName, NpgsqlDbType.Varchar) { Value = value });

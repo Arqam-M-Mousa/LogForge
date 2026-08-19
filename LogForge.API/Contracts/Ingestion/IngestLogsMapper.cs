@@ -91,7 +91,7 @@ public static class IngestLogsMapper
         return true;
     }
 
-    private static bool TryGetAttributeValue(JsonElement element, out object value)
+    private static bool TryGetAttributeValue(JsonElement element, out string value)
     {
         switch (element.ValueKind)
         {
@@ -99,32 +99,17 @@ public static class IngestLogsMapper
                 value = element.GetString()!;
                 return true;
             case JsonValueKind.Number:
-                value = GetNumber(element);
+                value = element.GetRawText();
                 return true;
             case JsonValueKind.True:
-                value = true;
+                value = "true";
                 return true;
             case JsonValueKind.False:
-                value = false;
+                value = "false";
                 return true;
             default:
                 value = null!;
                 return false;
         }
-    }
-
-    private static object GetNumber(JsonElement value)
-    {
-        if (value.TryGetInt64(out var integer))
-        {
-            return integer;
-        }
-
-        if (value.TryGetDecimal(out var decimalValue))
-        {
-            return decimalValue;
-        }
-
-        return value.GetDouble();
     }
 }
