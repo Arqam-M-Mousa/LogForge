@@ -1,0 +1,6 @@
+services:
+  logforge.api:
+    image: ${DOCKER_REGISTRY-}logforgeapi
+    build:
+      context: .
+      dockerfile: LogForge.API/Dockerfile
