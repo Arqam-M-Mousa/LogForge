@@ -6,7 +6,7 @@ public sealed record LogQueryFilter(
     DateTimeOffset? Since,
     DateTimeOffset? Until,
     string? MessageContains,
-    IReadOnlyDictionary<string, string> Attributes,
+    IReadOnlyDictionary<string, string> AttributesFilters,
     int Limit,
-    DateTimeOffset? CursorTimeStamp,
+    DateTimeOffset? CursorTimestamp,
     long? CursorId);
