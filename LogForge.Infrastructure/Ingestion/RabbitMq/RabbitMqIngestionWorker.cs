@@ -3,9 +3,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
-using RabbitMQ.Client.Events;
 using System.Text.Json;
-using System.Threading.Channels;
 
 namespace LogForge.Infrastructure.Ingestion.RabbitMq;
 
@@ -28,12 +26,13 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
         _logger = logger;
     }
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    protected override async Task ExecuteAsync(
+        CancellationToken stoppingToken)
     {
         var consumerCount = Math.Max(1, _options.ConsumerCount);
 
         _logger.LogInformation(
-            "Starting RabbitMQ ingestion with {ConsumerCount} consumers",
+            "Starting {ConsumerCount} RabbitMQ polling consumers",
             consumerCount);
 
         var consumers = Enumerable
@@ -52,7 +51,9 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
         {
             try
             {
-                await ConsumeAsync(consumerId, stoppingToken);
+                await PollAsync(
+                    consumerId,
+                    stoppingToken);
             }
             catch (OperationCanceledException)
                 when (stoppingToken.IsCancellationRequested)
@@ -63,7 +64,7 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
             {
                 _logger.LogError(
                     ex,
-                    "RabbitMQ consumer {ConsumerId} failed; retrying",
+                    "RabbitMQ polling consumer {ConsumerId} failed; retrying",
                     consumerId);
 
                 await Task.Delay(
@@ -73,28 +74,16 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
         }
     }
 
-    private async Task ConsumeAsync(
+    private async Task PollAsync(
         int consumerId,
         CancellationToken stoppingToken)
     {
-        var connection = await _connection.GetConnectionAsync(stoppingToken);
+        var connection =
+            await _connection.GetConnectionAsync(stoppingToken);
 
-        // IMPORTANT:
-        // Each consumer gets its own channel.
         await using var channel =
             await connection.CreateChannelAsync(
                 cancellationToken: stoppingToken);
-
-        var batchSize = Math.Max(1, _options.ConsumerBatchSize);
-
-        var deliveries = Channel.CreateBounded<RabbitDelivery>(
-            new BoundedChannelOptions(
-                Math.Max(batchSize, _options.PrefetchCount))
-            {
-                FullMode = BoundedChannelFullMode.Wait,
-                SingleReader = true,
-                SingleWriter = true
-            });
 
         await channel.QueueDeclareAsync(
             queue: _options.QueueName,
@@ -104,54 +93,45 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
             arguments: null,
             cancellationToken: stoppingToken);
 
-        await channel.BasicQosAsync(
-            prefetchSize: 0,
-            prefetchCount: _options.PrefetchCount,
-            global: false,
-            cancellationToken: stoppingToken);
-
-        var consumer = new AsyncEventingBasicConsumer(channel);
-
-        consumer.ReceivedAsync += async (_, delivery) =>
-        {
-            // Copy the body before the callback returns.
-            await deliveries.Writer.WriteAsync(
-                new RabbitDelivery(
-                    delivery.DeliveryTag,
-                    delivery.Body.ToArray()),
-                stoppingToken);
-        };
-
-        await channel.BasicConsumeAsync(
-            queue: _options.QueueName,
-            autoAck: false,
-            consumer: consumer,
-            cancellationToken: stoppingToken);
+        var batchSize = Math.Max(
+            1,
+            _options.ConsumerBatchSize);
 
         _logger.LogInformation(
-            "RabbitMQ consumer {ConsumerId} started on queue {QueueName}",
-            consumerId,
-            _options.QueueName);
+            "RabbitMQ polling consumer {ConsumerId} started",
+            consumerId);
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var batch = new List<RabbitDelivery>(batchSize)
-            {
-                await deliveries.Reader.ReadAsync(stoppingToken)
-            };
+            var batch = new List<RabbitDelivery>(
+                batchSize);
 
-            if (batch.Count < batchSize)
+            for (var i = 0; i < batchSize; i++)
+            {
+                var result = await channel.BasicGetAsync(
+                    queue: _options.QueueName,
+                    autoAck: false,
+                    cancellationToken: stoppingToken);
+
+                if (result is null)
+                    break;
+
+                batch.Add(
+                    new RabbitDelivery(
+                        result.DeliveryTag,
+                        result.Body.ToArray()));
+            }
+
+            if (batch.Count == 0)
             {
                 await Task.Delay(
                     TimeSpan.FromMilliseconds(
-                        Math.Max(1, _options.ConsumerBatchWaitMs)),
+                        Math.Max(
+                            1,
+                            _options.ConsumerPollIntervalMs)),
                     stoppingToken);
-            }
 
-            while (batch.Count < batchSize &&
-                   deliveries.Reader.TryRead(out var delivery))
-            {
-                batch.Add(delivery);
+                continue;
             }
 
             await ProcessBatchAsync(
@@ -176,17 +156,19 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
             try
             {
                 var parsedLogs =
-                    JsonSerializer.Deserialize<List<LogEntry>>(delivery.Body)
+                    JsonSerializer.Deserialize<List<LogEntry>>(
+                        delivery.Body)
                     ?? throw new JsonException(
                         "RabbitMQ message contained no logs");
 
-                validDeliveries.Add((delivery, parsedLogs));
+                validDeliveries.Add(
+                    (delivery, parsedLogs));
             }
             catch (JsonException ex)
             {
                 _logger.LogError(
                     ex,
-                    "Consumer {ConsumerId} discarding invalid RabbitMQ ingestion message",
+                    "Consumer {ConsumerId} discarding invalid RabbitMQ message",
                     consumerId);
 
                 await channel.BasicNackAsync(
@@ -201,7 +183,7 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
             return;
 
         var combinedLogs = validDeliveries
-            .SelectMany(item => item.Logs)
+            .SelectMany(x => x.Logs)
             .ToList();
 
         try
@@ -219,7 +201,7 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
             }
 
             _logger.LogDebug(
-                "Consumer {ConsumerId} persisted {MessageCount} RabbitMQ messages containing {LogCount} logs",
+                "Consumer {ConsumerId} processed {MessageCount} messages / {LogCount} logs",
                 consumerId,
                 validDeliveries.Count,
                 combinedLogs.Count);
@@ -230,7 +212,7 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
         {
             _logger.LogError(
                 ex,
-                "Consumer {ConsumerId} failed to persist RabbitMQ message batch; requeueing",
+                "Consumer {ConsumerId} failed to persist batch; requeueing",
                 consumerId);
 
             foreach (var item in validDeliveries)
