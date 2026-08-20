@@ -4,7 +4,7 @@ using LogForge.Domain.Query.Abstractions;
 using LogForge.Infrastructure.Aggregation;
 using LogForge.Infrastructure.Aggregation.Cache;
 using LogForge.Infrastructure.Ingestion;
-using LogForge.Infrastructure.Ingestion.WriterChannel;
+using LogForge.Infrastructure.Ingestion.RabbitMq;
 using LogForge.Infrastructure.Persistence;
 using LogForge.Infrastructure.Query;
 using LogForge.Infrastructure.Retention;
@@ -68,13 +68,13 @@ public static class DependencyInjection
         this IServiceCollection services,
         IConfiguration configuration)
     {
-        services.Configure<IngestionOptions>(options =>
-            configuration.GetSection(IngestionOptions.SectionName).Bind(options));
+        services.Configure<RabbitMqOptions>(options =>
+            configuration.GetSection(RabbitMqOptions.SectionName).Bind(options));
 
-        services.AddSingleton<LogIngestionChannel>();
+        services.AddSingleton<RabbitMqConnection>();
         services.AddSingleton<NpgsqlLogBulkWriter>();
-        services.AddSingleton<ILogIngestionService, ChannelLogIngestionService>();
-        services.AddHostedService<LogBatchWriterService>();
+        services.AddSingleton<ILogIngestionService, RabbitMqIngestionService>();
+        services.AddHostedService<RabbitMqIngestionWorker>();
 
         return services;
     }

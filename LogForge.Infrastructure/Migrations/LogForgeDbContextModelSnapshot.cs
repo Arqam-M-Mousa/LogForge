@@ -55,8 +55,9 @@ namespace LogForge.Infrastructure.Migrations
 
                     b.HasKey("Timestamp", "Id");
 
-                    b.HasIndex("Timestamp", "Id")
-                        .IsDescending();
+                    b.HasIndex("Timestamp");
+
+                    NpgsqlIndexBuilderExtensions.HasMethod(b.HasIndex("Timestamp"), "brin");
 
                     b.HasIndex("Service", "Timestamp", "Id")
                         .IsDescending(false, true, true);
@@ -82,9 +83,6 @@ namespace LogForge.Infrastructure.Migrations
                         .HasDefaultValue(0L);
 
                     b.HasKey("BucketStart", "Service", "Level");
-
-                    b.HasIndex("BucketStart")
-                        .HasDatabaseName("ix_log_minute_rollup_bucket");
 
                     b.ToTable("log_minute_rollup", (string)null);
                 });

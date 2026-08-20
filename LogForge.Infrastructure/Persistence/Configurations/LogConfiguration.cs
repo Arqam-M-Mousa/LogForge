@@ -33,10 +33,10 @@ public class LogConfiguration : IEntityTypeConfiguration<Log>
             .HasDefaultValueSql("'{}'::jsonb")
             .IsRequired();
 
-        builder.HasIndex(x => new { x.Timestamp, x.Id })
-            .IsDescending();
-
         builder.HasIndex(x => new { x.Service, x.Timestamp, x.Id })
             .IsDescending(false, true, true);
+
+        builder.HasIndex(x => x.Timestamp)
+            .HasMethod("brin");
     }
 }

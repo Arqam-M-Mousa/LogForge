@@ -1,8 +1,8 @@
-using System.Text.Json;
 using LogForge.Domain.Ingestion;
 using LogForge.Domain.Ingestion.Abstractions;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
+using System.Text.Json;
 
 namespace LogForge.Infrastructure.Ingestion.RabbitMq;
 

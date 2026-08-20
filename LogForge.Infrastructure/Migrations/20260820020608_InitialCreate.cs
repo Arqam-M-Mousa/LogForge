@@ -21,11 +21,11 @@ namespace LogForge.Infrastructure.Migrations
                     Level = table.Column<string>(type: "character varying(5)", maxLength: 5, nullable: false),
                     Service = table.Column<string>(type: "text", nullable: false),
                     Message = table.Column<string>(type: "text", nullable: false),
-                    Attributes = table.Column<Dictionary<string, object>>(type: "jsonb", nullable: true)
+                    Attributes = table.Column<Dictionary<string, object>>(type: "jsonb", nullable: false, defaultValueSql: "'{}'::jsonb")
                 },
                 constraints: table =>
                 {
-                    table.PrimaryKey("PK_log", x => x.Id);
+                    table.PrimaryKey("PK_log", x => new { x.Timestamp, x.Id });
                 });
 
             migrationBuilder.CreateTable(
@@ -49,15 +49,10 @@ namespace LogForge.Infrastructure.Migrations
                 descending: new[] { false, true, true });
 
             migrationBuilder.CreateIndex(
-                name: "IX_log_Timestamp_Id",
+                name: "IX_log_Timestamp",
                 table: "log",
-                columns: new[] { "Timestamp", "Id" },
-                descending: new bool[0]);
-
-            migrationBuilder.CreateIndex(
-                name: "ix_log_minute_rollup_bucket",
-                table: "log_minute_rollup",
-                column: "BucketStart");
+                column: "Timestamp")
+                .Annotation("Npgsql:IndexMethod", "brin");
         }
 
         /// <inheritdoc />

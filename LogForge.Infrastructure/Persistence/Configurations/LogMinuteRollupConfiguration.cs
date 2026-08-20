@@ -25,8 +25,5 @@ public class LogMinuteRollupConfiguration : IEntityTypeConfiguration<LogMinuteRo
         builder.Property(x => x.LogCount)
             .IsRequired()
             .HasDefaultValue(0L);
-
-        builder.HasIndex(x => x.BucketStart)
-            .HasDatabaseName("ix_log_minute_rollup_bucket");
     }
 }

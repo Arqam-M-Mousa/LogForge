@@ -1,10 +1,10 @@
-using System.Text.Json;
 using LogForge.Domain.Ingestion;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
 using RabbitMQ.Client.Events;
+using System.Text.Json;
 using System.Threading.Channels;
 
 namespace LogForge.Infrastructure.Ingestion.RabbitMq;
