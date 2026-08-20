@@ -7,8 +7,11 @@ services:
     environment:
       ASPNETCORE_HTTP_PORTS: 8080
       ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=logforge;Username=postgres;Password=postgres;Maximum Pool Size=15;Minimum Pool Size=2;Timeout=20;Command Timeout=20
+      RabbitMq__ConnectionString: amqp://guest:guest@rabbitmq:5672/
     depends_on:
       postgres:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     ports:
       - "8080:8080"
@@ -45,6 +48,23 @@ services:
         limits:
           cpus: '1.00'
           memory: 1024M
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    restart: unless-stopped
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
 
 volumes:
   postgres_data:
