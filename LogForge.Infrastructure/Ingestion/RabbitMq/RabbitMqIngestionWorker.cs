@@ -3,7 +3,9 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
+using RabbitMQ.Client.Events;
 using System.Text.Json;
+using System.Threading.Channels;
 
 namespace LogForge.Infrastructure.Ingestion.RabbitMq;
 
@@ -26,13 +28,12 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
         _logger = logger;
     }
 
-    protected override async Task ExecuteAsync(
-        CancellationToken stoppingToken)
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         var consumerCount = Math.Max(1, _options.ConsumerCount);
 
         _logger.LogInformation(
-            "Starting {ConsumerCount} RabbitMQ polling consumers",
+            "Starting {ConsumerCount} RabbitMQ push consumers",
             consumerCount);
 
         var consumers = Enumerable
@@ -43,103 +44,199 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
         await Task.WhenAll(consumers);
     }
 
-    private async Task RunConsumerAsync(
-        int consumerId,
-        CancellationToken stoppingToken)
+    private async Task RunConsumerAsync(int consumerId, CancellationToken stoppingToken)
     {
-        while (!stoppingToken.IsCancellationRequested)
+        try
         {
-            try
-            {
-                await PollAsync(
-                    consumerId,
-                    stoppingToken);
-            }
-            catch (OperationCanceledException)
-                when (stoppingToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(
-                    ex,
-                    "RabbitMQ polling consumer {ConsumerId} failed; retrying",
-                    consumerId);
+            var connection = await _connection.GetConnectionAsync(stoppingToken);
 
-                await Task.Delay(
-                    TimeSpan.FromSeconds(5),
-                    stoppingToken);
-            }
+            await using var channel = await connection.CreateChannelAsync(
+                cancellationToken: stoppingToken);
+
+            await channel.QueueDeclareAsync(
+                queue: _options.QueueName,
+                durable: true,
+                exclusive: false,
+                autoDelete: false,
+                arguments: null,
+                cancellationToken: stoppingToken);
+
+            var batchSize = Math.Max(1, _options.ConsumerBatchSize);
+
+
+            var deliveryChannel = Channel.CreateBounded<RabbitDelivery>(
+                new BoundedChannelOptions(batchSize * 2)
+                {
+                    SingleReader = true,
+                    SingleWriter = false,
+                    FullMode = BoundedChannelFullMode.Wait
+                });
+
+            await channel.BasicQosAsync(
+                prefetchSize: 0,
+                prefetchCount: (ushort)(_options.ConsumerPrefetchCount),
+                global: false,
+                cancellationToken: stoppingToken);
+
+            var consumer = new AsyncEventingBasicConsumer(channel);
+
+            consumer.ReceivedAsync += async (_, args) =>
+            {
+                try
+                {
+                    var delivery = new RabbitDelivery(args.DeliveryTag, args.Body.ToArray());
+
+                    await deliveryChannel.Writer.WriteAsync(delivery, stoppingToken);
+                }
+                catch (OperationCanceledException)
+                    when (stoppingToken.IsCancellationRequested)
+                {
+                    // Normal shutdown.
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(
+                        ex,
+                        "Consumer {ConsumerId} failed enqueueing delivery",
+                        consumerId);
+                }
+            };
+
+            var consumerTag = await channel.BasicConsumeAsync(
+                queue: _options.QueueName,
+                autoAck: false,
+                consumer: consumer,
+                cancellationToken: stoppingToken);
+
+            _logger.LogInformation(
+                "RabbitMQ push consumer {ConsumerId} started with tag {ConsumerTag}",
+                consumerId,
+                consumerTag);
+
+            // Runs until deliveryChannel is completed and drained.
+            await RunBatchLoopAsync(
+                channel,
+                deliveryChannel.Reader,
+                consumerId,
+                batchSize,
+                stoppingToken);
+
+            deliveryChannel.Writer.TryComplete();
+        }
+        catch (OperationCanceledException)
+            when (stoppingToken.IsCancellationRequested)
+        {
+            _logger.LogInformation(
+                "RabbitMQ push consumer {ConsumerId} stopped",
+                consumerId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "RabbitMQ push consumer {ConsumerId} failed", consumerId);
+            throw;
         }
     }
 
-    private async Task PollAsync(
+    private async Task RunBatchLoopAsync(
+        IChannel channel,
+        ChannelReader<RabbitDelivery> reader,
+        int consumerId,
+        int batchSize,
+        CancellationToken stoppingToken)
+    {
+        var flushInterval = TimeSpan.FromMilliseconds(
+            Math.Max(1, _options.ConsumerBatchFlushIntervalMs));
+
+        var batch = new List<RabbitDelivery>(batchSize);
+        using var flushTimer = new PeriodicTimer(flushInterval);
+
+        var timerTask = WaitForTimerAsync(flushTimer, stoppingToken);
+        var readTask = reader.ReadAsync(stoppingToken).AsTask();
+
+        try
+        {
+            while (true)
+            {
+                var completed = await Task.WhenAny(readTask, timerTask);
+
+                if (completed == readTask)
+                {
+                    RabbitDelivery item;
+
+                    try
+                    {
+                        item = readTask.Result;
+                    }
+                    catch (ChannelClosedException)
+                    {
+                        break;
+                    }
+
+                    batch.Add(item);
+
+                    if (batch.Count >= batchSize)
+                    {
+                        await FlushAsync(channel, batch, consumerId, stoppingToken);
+                    }
+
+                    readTask = reader.ReadAsync(stoppingToken).AsTask();
+                }
+                else
+                {
+                    if (batch.Count > 0)
+                    {
+                        await FlushAsync(channel, batch, consumerId, stoppingToken);
+                    }
+
+                    timerTask = WaitForTimerAsync(flushTimer, stoppingToken);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+            when (stoppingToken.IsCancellationRequested)
+        {
+            // Normal shutdown — fall through to final drain below.
+        }
+
+        // Drain whatever's left in the channel and flush on shutdown.
+        while (reader.TryRead(out var leftover))
+        {
+            batch.Add(leftover);
+        }
+
+        if (batch.Count > 0)
+        {
+            await FlushAsync(channel, batch, consumerId, CancellationToken.None);
+        }
+    }
+
+    private static async Task<bool> WaitForTimerAsync(
+        PeriodicTimer timer,
+        CancellationToken stoppingToken)
+    {
+        try
+        {
+            return await timer.WaitForNextTickAsync(stoppingToken);
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+    }
+
+    private async Task FlushAsync(
+        IChannel channel,
+        List<RabbitDelivery> batch,
         int consumerId,
         CancellationToken stoppingToken)
     {
-        var connection =
-            await _connection.GetConnectionAsync(stoppingToken);
+        if (batch.Count == 0)
+            return;
 
-        await using var channel =
-            await connection.CreateChannelAsync(
-                cancellationToken: stoppingToken);
+        var currentBatch = batch.ToArray();
+        batch.Clear();
 
-        await channel.QueueDeclareAsync(
-            queue: _options.QueueName,
-            durable: true,
-            exclusive: false,
-            autoDelete: false,
-            arguments: null,
-            cancellationToken: stoppingToken);
-
-        var batchSize = Math.Max(
-            1,
-            _options.ConsumerBatchSize);
-
-        _logger.LogInformation(
-            "RabbitMQ polling consumer {ConsumerId} started",
-            consumerId);
-
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            var batch = new List<RabbitDelivery>(
-                batchSize);
-
-            for (var i = 0; i < batchSize; i++)
-            {
-                var result = await channel.BasicGetAsync(
-                    queue: _options.QueueName,
-                    autoAck: false,
-                    cancellationToken: stoppingToken);
-
-                if (result is null)
-                    break;
-
-                batch.Add(
-                    new RabbitDelivery(
-                        result.DeliveryTag,
-                        result.Body.ToArray()));
-            }
-
-            if (batch.Count == 0)
-            {
-                await Task.Delay(
-                    TimeSpan.FromMilliseconds(
-                        Math.Max(
-                            1,
-                            _options.ConsumerPollIntervalMs)),
-                    stoppingToken);
-
-                continue;
-            }
-
-            await ProcessBatchAsync(
-                channel,
-                batch,
-                consumerId,
-                stoppingToken);
-        }
+        await ProcessBatchAsync(channel, currentBatch, consumerId, stoppingToken);
     }
 
     private async Task ProcessBatchAsync(
@@ -148,21 +245,16 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
         int consumerId,
         CancellationToken stoppingToken)
     {
-        var validDeliveries =
-            new List<(RabbitDelivery Delivery, List<LogEntry> Logs)>();
+        var validDeliveries = new List<(RabbitDelivery Delivery, List<LogEntry> Logs)>();
 
         foreach (var delivery in deliveries)
         {
             try
             {
-                var parsedLogs =
-                    JsonSerializer.Deserialize<List<LogEntry>>(
-                        delivery.Body)
-                    ?? throw new JsonException(
-                        "RabbitMQ message contained no logs");
+                var parsedLogs = JsonSerializer.Deserialize<List<LogEntry>>(delivery.Body)
+                    ?? throw new JsonException("RabbitMQ message contained no logs");
 
-                validDeliveries.Add(
-                    (delivery, parsedLogs));
+                validDeliveries.Add((delivery, parsedLogs));
             }
             catch (JsonException ex)
             {
@@ -182,15 +274,11 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
         if (validDeliveries.Count == 0)
             return;
 
-        var combinedLogs = validDeliveries
-            .SelectMany(x => x.Logs)
-            .ToList();
+        var combinedLogs = validDeliveries.SelectMany(x => x.Logs).ToList();
 
         try
         {
-            await WriteWithRetryAsync(
-                combinedLogs,
-                stoppingToken);
+            await WriteWithRetryAsync(combinedLogs, stoppingToken);
 
             foreach (var item in validDeliveries)
             {
@@ -207,8 +295,7 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
                 combinedLogs.Count);
         }
         catch (Exception ex)
-            when (ex is not OperationCanceledException ||
-                  !stoppingToken.IsCancellationRequested)
+            when (ex is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
         {
             _logger.LogError(
                 ex,
@@ -231,31 +318,23 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
         CancellationToken stoppingToken)
     {
         const int maxAttempts = 3;
-
         Exception? last = null;
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             try
             {
-                await _bulkWriter.WriteAsync(
-                    logs,
-                    stoppingToken);
-
+                await _bulkWriter.WriteAsync(logs, stoppingToken);
                 return;
             }
-            catch (OperationCanceledException)
-                when (stoppingToken.IsCancellationRequested)
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
                 throw;
             }
             catch (Exception ex) when (attempt < maxAttempts)
             {
                 last = ex;
-
-                await Task.Delay(
-                    TimeSpan.FromMilliseconds(25 * attempt),
-                    stoppingToken);
+                await Task.Delay(TimeSpan.FromMilliseconds(25 * attempt), stoppingToken);
             }
             catch (Exception ex)
             {
@@ -263,12 +342,8 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
             }
         }
 
-        throw last ??
-              new InvalidOperationException(
-                  "Log batch write failed.");
+        throw last ?? new InvalidOperationException("Log batch write failed.");
     }
 
-    private sealed record RabbitDelivery(
-        ulong DeliveryTag,
-        byte[] Body);
+    private sealed record RabbitDelivery(ulong DeliveryTag, byte[] Body);
 }

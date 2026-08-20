@@ -49,7 +49,7 @@ public static class DependencyInjection
 
         var dataSourceBuilder = new NpgsqlConnectionStringBuilder(connectionString)
         {
-            MaxPoolSize = 15,
+            MaxPoolSize = 10,
             MinPoolSize = 2
         };
 
