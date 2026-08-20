@@ -71,7 +71,7 @@ Invalid entries do not reject valid entries in the same batch. The response iden
 
 The endpoint returns `200` when at least one entry is accepted and `400` when the complete batch is rejected or the request body is invalid.
 
-Ingestion is asynchronous after bounded-channel admission. A successful response means the batch was accepted by the service; the background writer then persists it to PostgreSQL and the rollup table.
+Ingestion is asynchronous after RabbitMQ publisher confirmation. A successful response means the batch was accepted by RabbitMQ; the background consumer then persists it to PostgreSQL and the rollup table.
 
 ### `GET /logs`
 
@@ -197,9 +197,7 @@ The Compose file applies the required benchmark limits:
 
 - Application: `0.5 CPU`, `256 MB`
 - PostgreSQL: `1 CPU`, `1 GB`
-
-The application connection pool is limited to 15 connections and PostgreSQL is configured with 40 maximum connections. Ingestion uses a bounded channel with a capacity of 128 batches, a maximum batch size of 2000 logs, and a 25 ms flush interval.
-
+- 
 ## Measured Performance
 
 The measured report used Compose resource limits and a machine-speed factor of `0.693x` the reference machine.
@@ -237,7 +235,7 @@ All 15 correctness checks passed, including ingestion, filtering, pagination, ag
 
 ## Bottlenecks encountered
 
-- The initial ingestion design used a single unbounded channel and a single background writer. This caused the channel to fill and block the API when PostgreSQL was slow or under load. The ingestion design was changed to use a bounded channel with a maximum batch size and flush interval, which prevents unbounded memory growth and allows the API to return HTTP 429 when the channel is full.
+- Ingestion is decoupled through a durable RabbitMQ queue. Publisher confirms prevent acknowledging an API request before RabbitMQ accepts the message, while consumer acknowledgements ensure messages are requeued when persistence fails.
 - The initial aggregation design used only the raw log table, which caused slow queries for unfiltered aggregations. The aggregation design was changed to use a minute rollup table for unfiltered aggregations, which significantly improved performance.
 - The initial retention design used a single DELETE statement to remove expired logs, which caused long-running transactions and table bloat. The retention design was changed to drop fully expired partitions and delete remaining rows in batches, which improved performance and reduced bloat.
 - The initial log table design used a single primary key on the ID column, which caused slow queries for time-range queries. The log table design was changed to use a composite primary key on (Timestamp, Id), which improved query performance and allowed for partitioning by timestamp.
