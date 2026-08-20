@@ -30,36 +30,71 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        var consumerCount = Math.Max(1, _options.ConsumerCount);
+
+        _logger.LogInformation(
+            "Starting RabbitMQ ingestion with {ConsumerCount} consumers",
+            consumerCount);
+
+        var consumers = Enumerable
+            .Range(1, consumerCount)
+            .Select(id => RunConsumerAsync(id, stoppingToken))
+            .ToArray();
+
+        await Task.WhenAll(consumers);
+    }
+
+    private async Task RunConsumerAsync(
+        int consumerId,
+        CancellationToken stoppingToken)
+    {
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await ConsumeAsync(stoppingToken);
+                await ConsumeAsync(consumerId, stoppingToken);
             }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            catch (OperationCanceledException)
+                when (stoppingToken.IsCancellationRequested)
             {
                 return;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "RabbitMQ ingestion worker failed; retrying");
-                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+                _logger.LogError(
+                    ex,
+                    "RabbitMQ consumer {ConsumerId} failed; retrying",
+                    consumerId);
+
+                await Task.Delay(
+                    TimeSpan.FromSeconds(5),
+                    stoppingToken);
             }
         }
     }
 
-    private async Task ConsumeAsync(CancellationToken stoppingToken)
+    private async Task ConsumeAsync(
+        int consumerId,
+        CancellationToken stoppingToken)
     {
         var connection = await _connection.GetConnectionAsync(stoppingToken);
-        await using var channel = await connection.CreateChannelAsync(cancellationToken: stoppingToken);
+
+        // IMPORTANT:
+        // Each consumer gets its own channel.
+        await using var channel =
+            await connection.CreateChannelAsync(
+                cancellationToken: stoppingToken);
+
         var batchSize = Math.Max(1, _options.ConsumerBatchSize);
-        var deliveries = Channel.CreateBounded<RabbitDelivery>(new BoundedChannelOptions(
-            Math.Max(batchSize, _options.PrefetchCount))
-        {
-            FullMode = BoundedChannelFullMode.Wait,
-            SingleReader = true,
-            SingleWriter = true
-        });
+
+        var deliveries = Channel.CreateBounded<RabbitDelivery>(
+            new BoundedChannelOptions(
+                Math.Max(batchSize, _options.PrefetchCount))
+            {
+                FullMode = BoundedChannelFullMode.Wait,
+                SingleReader = true,
+                SingleWriter = true
+            });
 
         await channel.QueueDeclareAsync(
             queue: _options.QueueName,
@@ -68,18 +103,35 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
             autoDelete: false,
             arguments: null,
             cancellationToken: stoppingToken);
-        await channel.BasicQosAsync(0, _options.PrefetchCount, false, stoppingToken);
+
+        await channel.BasicQosAsync(
+            prefetchSize: 0,
+            prefetchCount: _options.PrefetchCount,
+            global: false,
+            cancellationToken: stoppingToken);
 
         var consumer = new AsyncEventingBasicConsumer(channel);
+
         consumer.ReceivedAsync += async (_, delivery) =>
         {
-            // Copy the body before the callback returns; RabbitMQ.Client reuses delivery memory.
+            // Copy the body before the callback returns.
             await deliveries.Writer.WriteAsync(
-                new RabbitDelivery(delivery.DeliveryTag, delivery.Body.ToArray()),
+                new RabbitDelivery(
+                    delivery.DeliveryTag,
+                    delivery.Body.ToArray()),
                 stoppingToken);
         };
 
-        await channel.BasicConsumeAsync(_options.QueueName, autoAck: false, consumer);
+        await channel.BasicConsumeAsync(
+            queue: _options.QueueName,
+            autoAck: false,
+            consumer: consumer,
+            cancellationToken: stoppingToken);
+
+        _logger.LogInformation(
+            "RabbitMQ consumer {ConsumerId} started on queue {QueueName}",
+            consumerId,
+            _options.QueueName);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -91,56 +143,104 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
             if (batch.Count < batchSize)
             {
                 await Task.Delay(
-                    TimeSpan.FromMilliseconds(Math.Max(1, _options.ConsumerBatchWaitMs)),
+                    TimeSpan.FromMilliseconds(
+                        Math.Max(1, _options.ConsumerBatchWaitMs)),
                     stoppingToken);
             }
 
-            while (batch.Count < batchSize && deliveries.Reader.TryRead(out var delivery))
+            while (batch.Count < batchSize &&
+                   deliveries.Reader.TryRead(out var delivery))
+            {
                 batch.Add(delivery);
+            }
 
-            await ProcessBatchAsync(channel, batch, stoppingToken);
+            await ProcessBatchAsync(
+                channel,
+                batch,
+                consumerId,
+                stoppingToken);
         }
     }
 
     private async Task ProcessBatchAsync(
         IChannel channel,
         IReadOnlyList<RabbitDelivery> deliveries,
+        int consumerId,
         CancellationToken stoppingToken)
     {
-        var validDeliveries = new List<(RabbitDelivery Delivery, List<LogEntry> Logs)>();
+        var validDeliveries =
+            new List<(RabbitDelivery Delivery, List<LogEntry> Logs)>();
 
         foreach (var delivery in deliveries)
         {
             try
             {
-                var parsedLogs = JsonSerializer.Deserialize<List<LogEntry>>(delivery.Body)
-                    ?? throw new JsonException("RabbitMQ message contained no logs");
+                var parsedLogs =
+                    JsonSerializer.Deserialize<List<LogEntry>>(delivery.Body)
+                    ?? throw new JsonException(
+                        "RabbitMQ message contained no logs");
+
                 validDeliveries.Add((delivery, parsedLogs));
             }
             catch (JsonException ex)
             {
-                _logger.LogError(ex, "Discarding invalid RabbitMQ ingestion message");
-                await channel.BasicNackAsync(delivery.DeliveryTag, false, false, stoppingToken);
+                _logger.LogError(
+                    ex,
+                    "Consumer {ConsumerId} discarding invalid RabbitMQ ingestion message",
+                    consumerId);
+
+                await channel.BasicNackAsync(
+                    delivery.DeliveryTag,
+                    multiple: false,
+                    requeue: false,
+                    cancellationToken: stoppingToken);
             }
         }
 
         if (validDeliveries.Count == 0)
             return;
 
-        var combinedLogs = validDeliveries.SelectMany(item => item.Logs).ToList();
+        var combinedLogs = validDeliveries
+            .SelectMany(item => item.Logs)
+            .ToList();
+
         try
         {
-            await WriteWithRetryAsync(combinedLogs, stoppingToken);
+            await WriteWithRetryAsync(
+                combinedLogs,
+                stoppingToken);
 
             foreach (var item in validDeliveries)
-                await channel.BasicAckAsync(item.Delivery.DeliveryTag, false, stoppingToken);
+            {
+                await channel.BasicAckAsync(
+                    item.Delivery.DeliveryTag,
+                    multiple: false,
+                    cancellationToken: stoppingToken);
+            }
+
+            _logger.LogDebug(
+                "Consumer {ConsumerId} persisted {MessageCount} RabbitMQ messages containing {LogCount} logs",
+                consumerId,
+                validDeliveries.Count,
+                combinedLogs.Count);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
+        catch (Exception ex)
+            when (ex is not OperationCanceledException ||
+                  !stoppingToken.IsCancellationRequested)
         {
-            _logger.LogError(ex, "Failed to persist RabbitMQ message batch; requeueing");
+            _logger.LogError(
+                ex,
+                "Consumer {ConsumerId} failed to persist RabbitMQ message batch; requeueing",
+                consumerId);
 
             foreach (var item in validDeliveries)
-                await channel.BasicNackAsync(item.Delivery.DeliveryTag, false, true, stoppingToken);
+            {
+                await channel.BasicNackAsync(
+                    item.Delivery.DeliveryTag,
+                    multiple: false,
+                    requeue: true,
+                    cancellationToken: stoppingToken);
+            }
         }
     }
 
@@ -149,23 +249,31 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
         CancellationToken stoppingToken)
     {
         const int maxAttempts = 3;
+
         Exception? last = null;
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             try
             {
-                await _bulkWriter.WriteAsync(logs, stoppingToken);
+                await _bulkWriter.WriteAsync(
+                    logs,
+                    stoppingToken);
+
                 return;
             }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            catch (OperationCanceledException)
+                when (stoppingToken.IsCancellationRequested)
             {
                 throw;
             }
             catch (Exception ex) when (attempt < maxAttempts)
             {
                 last = ex;
-                await Task.Delay(TimeSpan.FromMilliseconds(25 * attempt), stoppingToken);
+
+                await Task.Delay(
+                    TimeSpan.FromMilliseconds(25 * attempt),
+                    stoppingToken);
             }
             catch (Exception ex)
             {
@@ -173,8 +281,12 @@ public sealed class RabbitMqIngestionWorker : BackgroundService
             }
         }
 
-        throw last ?? new InvalidOperationException("Log batch write failed.");
+        throw last ??
+              new InvalidOperationException(
+                  "Log batch write failed.");
     }
 
-    private sealed record RabbitDelivery(ulong DeliveryTag, byte[] Body);
+    private sealed record RabbitDelivery(
+        ulong DeliveryTag,
+        byte[] Body);
 }
