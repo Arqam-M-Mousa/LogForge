@@ -8,8 +8,6 @@ public sealed class RabbitMqOptions
 
     public string QueueName { get; init; } = null!;
 
-    public int PublisherCount { get; init; }
-
     public int ConsumerCount { get; init; }
 
     public int ConsumerBatchSize { get; init; }

@@ -1,4 +1,5 @@
 ﻿using LogForge.Domain.Aggregation.Abstractions;
+using LogForge.Domain.Ingestion;
 using LogForge.Domain.Ingestion.Abstractions;
 using LogForge.Domain.Query.Abstractions;
 using LogForge.Infrastructure.Aggregation;
@@ -12,6 +13,7 @@ using MassTransit;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Npgsql;
 
 namespace LogForge.Infrastructure;
@@ -50,7 +52,7 @@ public static class DependencyInjection
 
         var dataSourceBuilder = new NpgsqlConnectionStringBuilder(connectionString)
         {
-            MaxPoolSize = 12,
+            MaxPoolSize = 20,
             MinPoolSize = 4
         };
 
@@ -72,40 +74,44 @@ public static class DependencyInjection
         services.Configure<RabbitMqOptions>(options =>
             configuration.GetSection(RabbitMqOptions.SectionName).Bind(options));
 
-        var rabbitMqOptions = configuration
-            .GetSection(RabbitMqOptions.SectionName)
-            .Get<RabbitMqOptions>()
-            ?? throw new InvalidOperationException("RabbitMq configuration is missing.");
+        var ingestionConnectionString = configuration.GetConnectionString("IngestionConnection")
+            ?? configuration.GetConnectionString("DefaultConnection")
+            ?? throw new InvalidOperationException("Ingestion connection string is missing.");
 
-        services.AddSingleton<NpgsqlLogBulkWriter>();
-        services.AddSingleton<RabbitMqIngestionConsumer>();
-        services.AddSingleton<ILogIngestionService, RabbitMqIngestionPublisher>();
+        var ingestionPoolBuilder = new NpgsqlConnectionStringBuilder(ingestionConnectionString)
+        {
+            MaxPoolSize = 20,
+            MinPoolSize = 5,
+            Timeout = 15,
+            CommandTimeout = 30
+        };
 
-        var consumerCount = Math.Max(1, rabbitMqOptions.ConsumerCount);
-        var prefetchCount = Math.Max(consumerCount, (int)rabbitMqOptions.ConsumerPrefetchCount);
+        var ingestionDataSource = new NpgsqlDataSourceBuilder(ingestionPoolBuilder.ConnectionString).Build();
+
+        services.AddSingleton<NpgsqlLogBulkWriter>(_ => new NpgsqlLogBulkWriter(ingestionDataSource));
+        services.AddSingleton<ILogIngestionService, RabbitMqPublisher>();
 
         services.AddMassTransit(x =>
         {
-            x.AddConsumer<RabbitMqIngestionConsumer>(cfg =>
-            {
-                cfg.ConcurrentMessageLimit = consumerCount;
-            });
+            x.AddConsumer<RabbitMqConsumer>();
 
             x.UsingRabbitMq((context, cfg) =>
             {
-                cfg.Host(new Uri(rabbitMqOptions.ConnectionString), h =>
-                {
-                    h.PublisherConfirmation = true;
-                    h.RequestedChannelMax(32);
-                });
+                var options = context.GetRequiredService<IOptions<RabbitMqOptions>>().Value;
 
-                cfg.UseRawJsonSerializer();
+                cfg.Host(options.ConnectionString);
 
-                cfg.ReceiveEndpoint(rabbitMqOptions.QueueName, e =>
+                cfg.ReceiveEndpoint(options.QueueName, e =>
                 {
-                    e.PrefetchCount = prefetchCount;
-                    e.ConcurrentMessageLimit = consumerCount;
-                    e.ConfigureConsumer<RabbitMqIngestionConsumer>(context);
+                    e.PrefetchCount = options.ConsumerPrefetchCount;
+                    e.ConcurrentMessageLimit = options.ConsumerCount;
+
+                    e.Batch<IngestLogsBatch>(b =>
+                    {
+                        b.MessageLimit = options.ConsumerBatchSize;
+                        b.TimeLimit = TimeSpan.FromMilliseconds(options.ConsumerBatchFlushIntervalMs);
+                        b.Consumer<RabbitMqConsumer, IngestLogsBatch>(context);
+                    });
                 });
             });
         });
