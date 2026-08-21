@@ -8,6 +8,7 @@ using LogForge.Infrastructure.Ingestion.RabbitMq;
 using LogForge.Infrastructure.Persistence;
 using LogForge.Infrastructure.Query;
 using LogForge.Infrastructure.Retention;
+using MassTransit;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -49,8 +50,8 @@ public static class DependencyInjection
 
         var dataSourceBuilder = new NpgsqlConnectionStringBuilder(connectionString)
         {
-            MaxPoolSize = 10,
-            MinPoolSize = 2
+            MaxPoolSize = 12,
+            MinPoolSize = 4
         };
 
         services.AddSingleton(new NpgsqlDataSourceBuilder(dataSourceBuilder.ConnectionString).Build());
@@ -71,10 +72,43 @@ public static class DependencyInjection
         services.Configure<RabbitMqOptions>(options =>
             configuration.GetSection(RabbitMqOptions.SectionName).Bind(options));
 
-        services.AddSingleton<RabbitMqConnection>();
+        var rabbitMqOptions = configuration
+            .GetSection(RabbitMqOptions.SectionName)
+            .Get<RabbitMqOptions>()
+            ?? throw new InvalidOperationException("RabbitMq configuration is missing.");
+
         services.AddSingleton<NpgsqlLogBulkWriter>();
-        services.AddSingleton<ILogIngestionService, RabbitMqIngestionService>();
-        services.AddHostedService<RabbitMqIngestionWorker>();
+        services.AddSingleton<RabbitMqIngestionConsumer>();
+        services.AddSingleton<ILogIngestionService, RabbitMqIngestionPublisher>();
+
+        var consumerCount = Math.Max(1, rabbitMqOptions.ConsumerCount);
+        var prefetchCount = Math.Max(consumerCount, (int)rabbitMqOptions.ConsumerPrefetchCount);
+
+        services.AddMassTransit(x =>
+        {
+            x.AddConsumer<RabbitMqIngestionConsumer>(cfg =>
+            {
+                cfg.ConcurrentMessageLimit = consumerCount;
+            });
+
+            x.UsingRabbitMq((context, cfg) =>
+            {
+                cfg.Host(new Uri(rabbitMqOptions.ConnectionString), h =>
+                {
+                    h.PublisherConfirmation = true;
+                    h.RequestedChannelMax(32);
+                });
+
+                cfg.UseRawJsonSerializer();
+
+                cfg.ReceiveEndpoint(rabbitMqOptions.QueueName, e =>
+                {
+                    e.PrefetchCount = prefetchCount;
+                    e.ConcurrentMessageLimit = consumerCount;
+                    e.ConfigureConsumer<RabbitMqIngestionConsumer>(context);
+                });
+            });
+        });
 
         return services;
     }
