@@ -8,11 +8,9 @@ using LogForge.Infrastructure.Ingestion.RabbitMq;
 using LogForge.Infrastructure.Persistence;
 using LogForge.Infrastructure.Query;
 using LogForge.Infrastructure.Retention;
-using MassTransit;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Options;
 using Npgsql;
 
 namespace LogForge.Infrastructure;
@@ -73,35 +71,13 @@ public static class DependencyInjection
         services.Configure<RabbitMqOptions>(options =>
             configuration.GetSection(RabbitMqOptions.SectionName).Bind(options));
 
+        services.AddSingleton<RabbitMqConnection>();
+
         services.AddSingleton(sp =>
             new NpgsqlLogBulkWriter(sp.GetRequiredService<NpgsqlDataSource>()));
 
         services.AddSingleton<ILogIngestionService, RabbitMqPublisher>();
-
-        services.AddMassTransit(x =>
-        {
-            x.AddConsumer<RabbitMqConsumer>();
-
-            x.UsingRabbitMq((context, cfg) =>
-            {
-                var options = context.GetRequiredService<IOptions<RabbitMqOptions>>().Value;
-
-                cfg.Host(options.ConnectionString);
-
-                cfg.ReceiveEndpoint(options.QueueName, e =>
-                {
-                    e.PrefetchCount = options.ConsumerPrefetchCount;
-                    e.ConcurrentMessageLimit = options.ConsumerCount;
-
-                    e.Batch<IngestLogsBatch>(b =>
-                    {
-                        b.MessageLimit = options.ConsumerBatchSize;
-                        b.TimeLimit = TimeSpan.FromMilliseconds(options.ConsumerBatchFlushIntervalMs);
-                        b.Consumer<RabbitMqConsumer, IngestLogsBatch>(context);
-                    });
-                });
-            });
-        });
+        services.AddHostedService<RabbitMqIngestionConsumer>();
 
         return services;
     }
