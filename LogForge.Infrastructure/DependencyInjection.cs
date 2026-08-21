@@ -1,5 +1,4 @@
 ﻿using LogForge.Domain.Aggregation.Abstractions;
-using LogForge.Domain.Ingestion;
 using LogForge.Domain.Ingestion.Abstractions;
 using LogForge.Domain.Query.Abstractions;
 using LogForge.Infrastructure.Aggregation;
@@ -52,7 +51,7 @@ public static class DependencyInjection
 
         var dataSourceBuilder = new NpgsqlConnectionStringBuilder(connectionString)
         {
-            MaxPoolSize = 20,
+            MaxPoolSize = 40,
             MinPoolSize = 4
         };
 
@@ -74,21 +73,9 @@ public static class DependencyInjection
         services.Configure<RabbitMqOptions>(options =>
             configuration.GetSection(RabbitMqOptions.SectionName).Bind(options));
 
-        var ingestionConnectionString = configuration.GetConnectionString("IngestionConnection")
-            ?? configuration.GetConnectionString("DefaultConnection")
-            ?? throw new InvalidOperationException("Ingestion connection string is missing.");
+        services.AddSingleton(sp =>
+            new NpgsqlLogBulkWriter(sp.GetRequiredService<NpgsqlDataSource>()));
 
-        var ingestionPoolBuilder = new NpgsqlConnectionStringBuilder(ingestionConnectionString)
-        {
-            MaxPoolSize = 20,
-            MinPoolSize = 5,
-            Timeout = 15,
-            CommandTimeout = 30
-        };
-
-        var ingestionDataSource = new NpgsqlDataSourceBuilder(ingestionPoolBuilder.ConnectionString).Build();
-
-        services.AddSingleton<NpgsqlLogBulkWriter>(_ => new NpgsqlLogBulkWriter(ingestionDataSource));
         services.AddSingleton<ILogIngestionService, RabbitMqPublisher>();
 
         services.AddMassTransit(x =>
