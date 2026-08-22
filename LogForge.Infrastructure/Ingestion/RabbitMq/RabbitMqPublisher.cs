@@ -13,6 +13,7 @@ public sealed class RabbitMqPublisher : ILogIngestionService, IAsyncDisposable
     private readonly RabbitMqOptions _options;
     private readonly ILogger<RabbitMqPublisher> _logger;
     private readonly SemaphoreSlim _publishGate = new(1, 1);
+    private readonly SemaphoreSlim _inFlightLimiter = new(250); 
     private IChannel? _channel;
 
     public RabbitMqPublisher(
@@ -31,6 +32,14 @@ public sealed class RabbitMqPublisher : ILogIngestionService, IAsyncDisposable
             return ValueTask.CompletedTask;
 
         var logsList = logs as List<LogEntry> ?? [.. logs];
+
+        if (!_inFlightLimiter.Wait(0))
+        {
+            _logger.LogWarning(
+                "Publish backlog full, dropping batch of {Count} logs to avoid unbounded memory growth",
+                logsList.Count);
+            return ValueTask.CompletedTask;
+        }
 
         _ = PublishInBackgroundAsync(logsList);
 
@@ -79,6 +88,10 @@ public sealed class RabbitMqPublisher : ILogIngestionService, IAsyncDisposable
                 "Fire-and-forget publish failed for batch of {Count} logs. Batch was NOT accepted by RabbitMQ.",
                 logs.Count);
         }
+        finally
+        {
+            _inFlightLimiter.Release();
+        }
     }
 
     private async Task<IChannel> CreateChannelAsync(CancellationToken cancellationToken)
@@ -105,5 +118,6 @@ public sealed class RabbitMqPublisher : ILogIngestionService, IAsyncDisposable
             await _channel.DisposeAsync();
 
         _publishGate.Dispose();
+        _inFlightLimiter.Dispose();
     }
 }
