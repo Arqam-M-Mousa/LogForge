@@ -30,11 +30,21 @@ public sealed class RabbitMqIngestionConsumer : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        var consumerCount = Math.Max(1, _options.ConsumerCount);
+
+        var workers = Enumerable.Range(0, consumerCount)
+            .Select(workerId => RunWorkerLoopAsync(workerId, stoppingToken));
+
+        await Task.WhenAll(workers);
+    }
+
+    private async Task RunWorkerLoopAsync(int workerId, CancellationToken stoppingToken)
+    {
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
-                await ConsumeAsync(stoppingToken);
+                await ConsumeAsync(workerId, stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -42,17 +52,18 @@ public sealed class RabbitMqIngestionConsumer : BackgroundService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "RabbitMQ ingestion worker failed; retrying");
+                _logger.LogError(ex, "RabbitMQ ingestion worker {WorkerId} failed; retrying", workerId);
                 await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
             }
         }
     }
 
-    private async Task ConsumeAsync(CancellationToken stoppingToken)
+    private async Task ConsumeAsync(int workerId, CancellationToken stoppingToken)
     {
         var connection = await _connection.GetConnectionAsync(stoppingToken);
         await using var channel = await connection.CreateChannelAsync(cancellationToken: stoppingToken);
         var batchSize = Math.Max(1, _options.ConsumerBatchSize);
+
         var deliveries = Channel.CreateBounded<RabbitDelivery>(new BoundedChannelOptions(
             Math.Max(batchSize, _options.PrefetchCount))
         {
@@ -82,26 +93,36 @@ public sealed class RabbitMqIngestionConsumer : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            var batch = new List<RabbitDelivery>(batchSize)
-            {
-                await deliveries.Reader.ReadAsync(stoppingToken)
-            };
-
-            if (batch.Count < batchSize)
-            {
-                await Task.Delay(
-                    TimeSpan.FromMilliseconds(Math.Max(1, _options.ConsumerBatchWaitMs)),
-                    stoppingToken);
-            }
-
-            while (batch.Count < batchSize && deliveries.Reader.TryRead(out var delivery))
-                batch.Add(delivery);
-
-            await ProcessBatchAsync(channel, batch, stoppingToken);
+            var batch = await ReadBatchAsync(deliveries.Reader, batchSize, stoppingToken);
+            await ProcessBatchAsync(workerId, channel, batch, stoppingToken);
         }
     }
 
+    private async Task<List<RabbitDelivery>> ReadBatchAsync(
+        ChannelReader<RabbitDelivery> reader,
+        int batchSize,
+        CancellationToken stoppingToken)
+    {
+        var batch = new List<RabbitDelivery>(batchSize)
+        {
+            await reader.ReadAsync(stoppingToken)
+        };
+
+        if (batch.Count < batchSize)
+        {
+            await Task.Delay(
+                TimeSpan.FromMilliseconds(Math.Max(1, _options.ConsumerBatchWaitMs)),
+                stoppingToken);
+        }
+
+        while (batch.Count < batchSize && reader.TryRead(out var delivery))
+            batch.Add(delivery);
+
+        return batch;
+    }
+
     private async Task ProcessBatchAsync(
+        int workerId,
         IChannel channel,
         IReadOnlyList<RabbitDelivery> deliveries,
         CancellationToken stoppingToken)
@@ -110,37 +131,57 @@ public sealed class RabbitMqIngestionConsumer : BackgroundService
 
         foreach (var delivery in deliveries)
         {
+            List<LogEntry>? parsedLogs;
             try
             {
-                var parsedLogs = JsonSerializer.Deserialize<List<LogEntry>>(delivery.Body)
-                    ?? throw new JsonException("RabbitMQ message contained no logs");
-                validDeliveries.Add((delivery, parsedLogs));
+                parsedLogs = JsonSerializer.Deserialize<List<LogEntry>>(delivery.Body);
+                if (parsedLogs is null)
+                    throw new JsonException("RabbitMQ message contained no logs");
             }
             catch (JsonException ex)
             {
-                _logger.LogError(ex, "Discarding invalid RabbitMQ ingestion message");
+                _logger.LogError(ex, "Worker {WorkerId}: discarding invalid RabbitMQ ingestion message", workerId);
                 await channel.BasicNackAsync(delivery.DeliveryTag, false, false, stoppingToken);
+                continue;
             }
+
+            validDeliveries.Add((delivery, parsedLogs));
         }
 
         if (validDeliveries.Count == 0)
             return;
 
         var combinedLogs = validDeliveries.SelectMany(item => item.Logs).ToList();
+
         try
         {
             await WriteWithRetryAsync(combinedLogs, stoppingToken);
-
-            foreach (var item in validDeliveries)
-                await channel.BasicAckAsync(item.Delivery.DeliveryTag, false, stoppingToken);
+            await AckAllAsync(channel, validDeliveries, stoppingToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !stoppingToken.IsCancellationRequested)
         {
-            _logger.LogError(ex, "Failed to persist RabbitMQ message batch; requeueing");
-
-            foreach (var item in validDeliveries)
-                await channel.BasicNackAsync(item.Delivery.DeliveryTag, false, true, stoppingToken);
+            _logger.LogError(ex, "Worker {WorkerId}: failed to persist RabbitMQ message batch; requeueing", workerId);
+            await NackAllAsync(channel, validDeliveries, requeue: true, stoppingToken);
         }
+    }
+
+    private static async Task AckAllAsync(
+        IChannel channel,
+        List<(RabbitDelivery Delivery, List<LogEntry> Logs)> deliveries,
+        CancellationToken stoppingToken)
+    {
+        foreach (var item in deliveries)
+            await channel.BasicAckAsync(item.Delivery.DeliveryTag, false, stoppingToken);
+    }
+
+    private static async Task NackAllAsync(
+        IChannel channel,
+        List<(RabbitDelivery Delivery, List<LogEntry> Logs)> deliveries,
+        bool requeue,
+        CancellationToken stoppingToken)
+    {
+        foreach (var item in deliveries)
+            await channel.BasicNackAsync(item.Delivery.DeliveryTag, false, requeue, stoppingToken);
     }
 
     private async Task WriteWithRetryAsync(IReadOnlyList<LogEntry> logs, CancellationToken stoppingToken)
