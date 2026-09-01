@@ -1,7 +1,7 @@
-﻿using LogForge.Api.Contracts.Common;
+using LogForge.API.Contracts.Common;
 using LogForge.Domain.Query;
 
-namespace LogForge.Api.Contracts.Query;
+namespace LogForge.API.Contracts.Query;
 
 public static class QueryLogsMapper
 {
@@ -52,15 +52,10 @@ public static class QueryLogsMapper
             return false;
         }
 
-        var limit = 100;
-
-        if (!string.IsNullOrWhiteSpace(request.Limit))
+        if (!LogFilterParsing.TryParseLimit(request.Limit, out var limit))
         {
-            if (!int.TryParse(request.Limit, out limit) || limit is < 1 or > 1000)
-            {
-                error = "limit must be a number between 1 and 1000";
-                return false;
-            }
+            error = "limit must be a number between 1 and 1000";
+            return false;
         }
 
         LogCursor? cursor = null;
@@ -102,7 +97,7 @@ public static class QueryLogsMapper
             })
             .ToList();
 
-        var nextCursor = result.HasMore > 0 && result.Logs.Count > 0
+        var nextCursor = result.HasMore && result.Logs.Count > 0
             ? new LogCursor(result.Logs[^1].Timestamp, result.Logs[^1].Id).Encode()
             : null;
 

@@ -2,7 +2,6 @@
 using LogForge.Domain.Ingestion.Abstractions;
 using LogForge.Domain.Query.Abstractions;
 using LogForge.Infrastructure.Aggregation;
-using LogForge.Infrastructure.Aggregation.Cache;
 using LogForge.Infrastructure.Ingestion;
 using LogForge.Infrastructure.Ingestion.RabbitMq;
 using LogForge.Infrastructure.Persistence;

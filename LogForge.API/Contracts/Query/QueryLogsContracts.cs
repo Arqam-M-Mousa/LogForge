@@ -1,6 +1,6 @@
-﻿using System.Text.Json.Serialization;
+using System.Text.Json.Serialization;
 
-namespace LogForge.Api.Contracts.Query;
+namespace LogForge.API.Contracts.Query;
 
 public sealed class QueryLogsRequest
 {

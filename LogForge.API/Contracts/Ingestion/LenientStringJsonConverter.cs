@@ -1,7 +1,7 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace LogForge.Api.Contracts.Ingestion;
+namespace LogForge.API.Contracts.Ingestion;
 
 public sealed class LenientStringJsonConverter : JsonConverter<string?>
 {

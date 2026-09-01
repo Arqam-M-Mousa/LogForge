@@ -117,8 +117,8 @@ public sealed class NpgsqlLogQueryService : ILogQueryService
                 attributes));
         }
 
-        long hasMore = rows.Count - filter.Limit;
-        if (hasMore > 0)
+        var hasMore = rows.Count > filter.Limit;
+        if (hasMore)
             rows.RemoveAt(rows.Count - 1);
 
         return new LogQueryResult(rows, hasMore);

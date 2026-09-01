@@ -1,7 +1,7 @@
-﻿using LogForge.Api.Contracts.Common;
+using LogForge.API.Contracts.Common;
 using LogForge.Domain.Aggregation;
 
-namespace LogForge.Api.Contracts.Aggregation;
+namespace LogForge.API.Contracts.Aggregation;
 
 public static class AggregateLogsMapper
 {

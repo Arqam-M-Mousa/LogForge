@@ -1,7 +1,7 @@
-﻿using System.Text;
+using System.Text;
 using System.Text.Json;
 
-namespace LogForge.Api.Contracts.Query;
+namespace LogForge.API.Contracts.Query;
 
 public sealed record LogCursor(DateTimeOffset Timestamp, long Id)
 {

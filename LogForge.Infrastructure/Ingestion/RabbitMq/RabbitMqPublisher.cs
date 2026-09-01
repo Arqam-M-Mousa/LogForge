@@ -4,16 +4,19 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
 using System.Text.Json;
+using System.Threading.Channels;
 
 namespace LogForge.Infrastructure.Ingestion.RabbitMq;
 
 public sealed class RabbitMqPublisher : ILogIngestionService, IAsyncDisposable
 {
+    private const int MaxInFlightBatches = 250;
+
     private readonly RabbitMqConnection _connection;
     private readonly RabbitMqOptions _options;
     private readonly ILogger<RabbitMqPublisher> _logger;
-    private readonly SemaphoreSlim _publishGate = new(1, 1);
-    private readonly SemaphoreSlim _inFlightLimiter = new(250); 
+    private readonly Channel<List<LogEntry>> _queue;
+    private readonly Task _pump;
     private IChannel? _channel;
 
     public RabbitMqPublisher(
@@ -24,6 +27,12 @@ public sealed class RabbitMqPublisher : ILogIngestionService, IAsyncDisposable
         _connection = connection;
         _options = options.Value;
         _logger = logger;
+        _queue = Channel.CreateBounded<List<LogEntry>>(new BoundedChannelOptions(MaxInFlightBatches)
+        {
+            SingleReader = true,
+            FullMode = BoundedChannelFullMode.DropWrite
+        });
+        _pump = PumpAsync();
     }
 
     public ValueTask PublishAsync(IReadOnlyList<LogEntry> logs, CancellationToken cancellationToken)
@@ -31,75 +40,64 @@ public sealed class RabbitMqPublisher : ILogIngestionService, IAsyncDisposable
         if (logs.Count == 0)
             return ValueTask.CompletedTask;
 
-        var logsList = logs as List<LogEntry> ?? [.. logs];
+        var batch = logs as List<LogEntry> ?? [.. logs];
 
-        if (!_inFlightLimiter.Wait(0))
-        {
-            _logger.LogWarning(
-                "Publish backlog full, dropping batch of {Count} logs to avoid unbounded memory growth",
-                logsList.Count);
-            return ValueTask.CompletedTask;
-        }
-
-        _ = PublishInBackgroundAsync(logsList);
+        if (!_queue.Writer.TryWrite(batch))
+            _logger.LogWarning("Publish backlog full, dropping batch of {Count} logs to avoid unbounded memory growth", batch.Count);
 
         return ValueTask.CompletedTask;
     }
 
-    private async Task PublishInBackgroundAsync(List<LogEntry> logs)
+    private async Task PumpAsync()
     {
-        try
+        await foreach (var batch in _queue.Reader.ReadAllAsync(CancellationToken.None))
         {
-            var body = JsonSerializer.SerializeToUtf8Bytes(logs);
-
-            await _publishGate.WaitAsync(CancellationToken.None);
             try
             {
-                if (_channel is not { IsOpen: true })
-                {
-                    if (_channel is not null)
-                        await _channel.DisposeAsync();
-
-                    _channel = await CreateChannelAsync(CancellationToken.None);
-                }
-
-                var properties = new BasicProperties
-                {
-                    ContentType = "application/json",
-                    DeliveryMode = DeliveryModes.Persistent
-                };
-
-                await _channel.BasicPublishAsync(
-                    exchange: string.Empty,
-                    routingKey: _options.QueueName,
-                    mandatory: true,
-                    basicProperties: properties,
-                    body: body,
-                    cancellationToken: CancellationToken.None);
+                await PublishCoreAsync(batch);
             }
-            finally
+            catch (Exception ex)
             {
-                _publishGate.Release();
+                _logger.LogError(ex,
+                    "Fire-and-forget publish failed for batch of {Count} logs. Batch was NOT accepted by RabbitMQ.",
+                    batch.Count);
             }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex,
-                "Fire-and-forget publish failed for batch of {Count} logs. Batch was NOT accepted by RabbitMQ.",
-                logs.Count);
-        }
-        finally
-        {
-            _inFlightLimiter.Release();
         }
     }
 
-    private async Task<IChannel> CreateChannelAsync(CancellationToken cancellationToken)
+    private async Task PublishCoreAsync(List<LogEntry> logs)
     {
-        var connection = await _connection.GetConnectionAsync(cancellationToken);
+        var body = JsonSerializer.SerializeToUtf8Bytes(logs);
+
+        if (_channel is not { IsOpen: true })
+        {
+            if (_channel is not null)
+                await _channel.DisposeAsync();
+
+            _channel = await CreateChannelAsync();
+        }
+
+        var properties = new BasicProperties
+        {
+            ContentType = "application/json",
+            DeliveryMode = DeliveryModes.Transient
+        };
+
+        await _channel.BasicPublishAsync(
+            exchange: string.Empty,
+            routingKey: _options.QueueName,
+            mandatory: true,
+            basicProperties: properties,
+            body: body,
+            cancellationToken: CancellationToken.None);
+    }
+
+    private async Task<IChannel> CreateChannelAsync()
+    {
+        var connection = await _connection.GetConnectionAsync(CancellationToken.None);
         var channel = await connection.CreateChannelAsync(
             new CreateChannelOptions(true, true, null, null),
-            cancellationToken);
+            CancellationToken.None);
 
         await channel.QueueDeclareAsync(
             queue: _options.QueueName,
@@ -107,17 +105,17 @@ public sealed class RabbitMqPublisher : ILogIngestionService, IAsyncDisposable
             exclusive: false,
             autoDelete: false,
             arguments: null,
-            cancellationToken: cancellationToken);
+            cancellationToken: CancellationToken.None);
 
         return channel;
     }
 
     public async ValueTask DisposeAsync()
     {
+        _queue.Writer.TryComplete();
+        await _pump;
+
         if (_channel is not null)
             await _channel.DisposeAsync();
-
-        _publishGate.Dispose();
-        _inFlightLimiter.Dispose();
     }
 }

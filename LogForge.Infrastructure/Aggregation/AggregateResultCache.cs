@@ -2,7 +2,7 @@
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 
-namespace LogForge.Infrastructure.Aggregation.Cache;
+namespace LogForge.Infrastructure.Aggregation;
 
 public sealed class AggregateResultCache
 {

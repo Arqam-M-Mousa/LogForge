@@ -1,4 +1,4 @@
-﻿namespace LogForge.Infrastructure.Aggregation.Cache;
+﻿namespace LogForge.Infrastructure.Aggregation;
 
 public sealed class AggregationCacheOptions
 {

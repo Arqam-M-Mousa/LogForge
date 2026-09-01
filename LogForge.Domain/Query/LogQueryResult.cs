@@ -10,4 +10,4 @@ public sealed record LogQueryItem(
 
 public sealed record LogQueryResult(
     IReadOnlyList<LogQueryItem> Logs,
-    long HasMore);
+    bool HasMore);

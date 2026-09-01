@@ -2,5 +2,5 @@
 
 public interface ILogIngestionService
 {
-    public ValueTask PublishAsync(IReadOnlyList<LogEntry> logs, CancellationToken cancellationToken);
+    ValueTask PublishAsync(IReadOnlyList<LogEntry> logs, CancellationToken cancellationToken);
 }

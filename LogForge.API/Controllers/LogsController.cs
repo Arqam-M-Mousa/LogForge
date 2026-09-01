@@ -1,9 +1,9 @@
-﻿using LogForge.Api.Contracts.Aggregation;
-using LogForge.Api.Contracts.Ingestion;
-using LogForge.Api.Contracts.Query;
-using LogForge.API.Contracts;
+using LogForge.API.Contracts.Aggregation;
+using LogForge.API.Contracts.Common;
+using LogForge.API.Contracts.Ingestion;
+using LogForge.API.Contracts.Query;
+using LogForge.API.Validation;
 using LogForge.Domain.Aggregation.Abstractions;
-using LogForge.Domain.Ingestion;
 using LogForge.Domain.Ingestion.Abstractions;
 using LogForge.Domain.Query.Abstractions;
 using Microsoft.AspNetCore.Mvc;
@@ -31,31 +31,12 @@ public sealed class LogsController : ControllerBase
     [HttpPost]
     public async Task<IActionResult> Ingest(IngestLogsRequest request, CancellationToken cancellationToken)
     {
-        if (request.Logs == null || request.Logs.Count == 0)
+        if (request.Logs is not { Count: > 0 })
         {
             return BadRequest(new ApiError("logs must contain at least one entry"));
         }
 
-        var accepted = new List<LogEntry>(request.Logs.Count);
-        var rejected = new List<RejectedLog>();
-        var maximumAllowedTimestamp = DateTimeOffset.UtcNow.AddMinutes(5);
-
-        for (var index = 0; index < request.Logs.Count; index++)
-        {
-            if (IngestLogsMapper.TryParse(request.Logs[index], maximumAllowedTimestamp, out var entry, out var reason))
-            {
-                accepted.Add(entry!);
-
-            }
-            else
-            {
-                rejected.Add(new RejectedLog
-                {
-                    Index = index,
-                    Reason = reason
-                });
-            }
-        }
+        var (accepted, rejected) = LogEntryValidator.Validate(request.Logs);
 
         if (accepted.Count > 0)
         {

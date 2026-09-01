@@ -1,7 +1,7 @@
-﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc;
 using System.Text.Json.Serialization;
 
-namespace LogForge.Api.Contracts.Aggregation;
+namespace LogForge.API.Contracts.Aggregation;
 
 public sealed class AggregateLogsRequest
 {

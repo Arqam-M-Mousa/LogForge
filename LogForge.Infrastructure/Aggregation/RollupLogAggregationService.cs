@@ -1,6 +1,5 @@
 ﻿using LogForge.Domain.Aggregation;
 using LogForge.Domain.Aggregation.Abstractions;
-using LogForge.Infrastructure.Aggregation.Cache;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using NpgsqlTypes;

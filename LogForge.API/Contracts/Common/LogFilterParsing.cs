@@ -1,4 +1,4 @@
-﻿namespace LogForge.Api.Contracts.Common;
+namespace LogForge.API.Contracts.Common;
 
 public static class LogFilterParsing
 {
@@ -24,6 +24,12 @@ public static class LogFilterParsing
 
         timestamp = timestamp.ToUniversalTime();
         return true;
+    }
+
+    public static bool TryParseLimit(string? value, out int limit)
+    {
+        limit = 100;
+        return string.IsNullOrWhiteSpace(value) || int.TryParse(value, out limit) && limit is >= 1 and <= 1000;
     }
 
     public static IReadOnlyDictionary<string, string> ParseAttributeFilters(IQueryCollection query)

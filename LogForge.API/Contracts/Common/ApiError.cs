@@ -1,3 +1,3 @@
-﻿namespace LogForge.API.Contracts;
+namespace LogForge.API.Contracts.Common;
 
 public sealed record ApiError(string Error);
