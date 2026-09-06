@@ -240,7 +240,7 @@ All 15 correctness checks passed, including ingestion, filtering, pagination, ag
 ## Bottlenecks encountered
 
 - The initial ingestion path used MassTransit over RabbitMQ with publisher confirms awaited inline on the request path. Under concurrent load this added 100-300ms of publish latency per request, which starved the background consumer of CPU on the application's constrained core budget and left PostgreSQL idle during load while a growing backlog was worked off only after load stopped. Publishing was changed to fire-and-forget so the HTTP response no longer waits on a broker round trip.
-- MassTransit's batch-consumer pipeline appeared to process batches close to sequentially even with multiple configured consumers, capping consumption throughput well below what PostgreSQL could sustain. Ingestion was rebuilt on the `RabbitMQ.Client` library directly, with a hand-rolled batching consumer, which removed the framework's dispatch overhead and let consumption reach the same throughput PostgreSQL could already sustain.
+- MassTransit's batch-consumer pipeline must have both batch concurrency and endpoint concurrency configured. The current pipeline sets both to the configured consumer count and scales endpoint prefetch by that count, preserving the four-way parallel database writes and the 400-message total prefetch used by the raw implementation without returning to hand-rolled RabbitMQ dispatch.
 - Fire-and-forget publishing removes natural backpressure from the request path: every accepted request spawns a background publish task regardless of how many are already pending. Without a limit, a sustained burst beyond RabbitMQ's ability to keep up could accumulate pending publish tasks and exhaust the application's memory limit. A bounded in-flight counter caps concurrent background publishes; batches beyond the cap are dropped and logged rather than queued unboundedly.
 - The initial aggregation design used only the raw log table, which caused slow queries for unfiltered aggregations. The aggregation design was changed to use a minute rollup table for unfiltered aggregations, which significantly improved performance.
 - The initial retention design used a single DELETE statement to remove expired logs, which caused long-running transactions and table bloat. The retention design was changed to drop fully expired partitions and delete remaining rows in batches, which improved performance and reduced bloat.
@@ -252,6 +252,6 @@ Implemented optimization features including:
 
 - Time-range partitioning
 - Minute rollups for unfiltered aggregation
-- Fire-and-forget, bounded asynchronous ingestion via a direct RabbitMQ client
+- Fire-and-forget, bounded asynchronous ingestion via MassTransit over RabbitMQ
 - In-memory aggregate-result caching
 - Partition-aware retention

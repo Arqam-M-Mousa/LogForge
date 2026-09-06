@@ -1,9 +1,9 @@
 using LogForge.Domain.Ingestion;
 using LogForge.Domain.Ingestion.Abstractions;
+using MassTransit;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using RabbitMQ.Client;
-using System.Text.Json;
 using System.Threading.Channels;
 
 namespace LogForge.Infrastructure.Ingestion.RabbitMq;
@@ -12,25 +12,27 @@ public sealed class RabbitMqPublisher : ILogIngestionService, IAsyncDisposable
 {
     private const int MaxInFlightBatches = 250;
 
-    private readonly RabbitMqConnection _connection;
+    private readonly IBus _bus;
+    private readonly Uri _queueAddress;
     private readonly RabbitMqOptions _options;
     private readonly ILogger<RabbitMqPublisher> _logger;
     private readonly Channel<List<LogEntry>> _queue;
     private readonly Task _pump;
-    private IChannel? _channel;
+    private ISendEndpoint? _endpoint;
 
     public RabbitMqPublisher(
-        RabbitMqConnection connection,
+        IBus bus,
         IOptions<RabbitMqOptions> options,
         ILogger<RabbitMqPublisher> logger)
     {
-        _connection = connection;
+        _bus = bus;
         _options = options.Value;
         _logger = logger;
+        _queueAddress = new Uri($"queue:{_options.QueueName}");
         _queue = Channel.CreateBounded<List<LogEntry>>(new BoundedChannelOptions(MaxInFlightBatches)
         {
             SingleReader = true,
-            FullMode = BoundedChannelFullMode.DropWrite
+            FullMode = BoundedChannelFullMode.Wait
         });
         _pump = PumpAsync();
     }
@@ -67,55 +69,22 @@ public sealed class RabbitMqPublisher : ILogIngestionService, IAsyncDisposable
 
     private async Task PublishCoreAsync(List<LogEntry> logs)
     {
-        var body = JsonSerializer.SerializeToUtf8Bytes(logs);
+        var endpoint = _endpoint ??= await _bus.GetSendEndpoint(_queueAddress);
+        await endpoint.Send(
+            new IngestLogsBatch { Logs = logs },
+            sendContext =>
+            {
+                sendContext.SetAwaitAck(false);
 
-        if (_channel is not { IsOpen: true })
-        {
-            if (_channel is not null)
-                await _channel.DisposeAsync();
-
-            _channel = await CreateChannelAsync();
-        }
-
-        var properties = new BasicProperties
-        {
-            ContentType = "application/json",
-            DeliveryMode = DeliveryModes.Transient
-        };
-
-        await _channel.BasicPublishAsync(
-            exchange: string.Empty,
-            routingKey: _options.QueueName,
-            mandatory: true,
-            basicProperties: properties,
-            body: body,
-            cancellationToken: CancellationToken.None);
-    }
-
-    private async Task<IChannel> CreateChannelAsync()
-    {
-        var connection = await _connection.GetConnectionAsync(CancellationToken.None);
-        var channel = await connection.CreateChannelAsync(
-            new CreateChannelOptions(true, true, null, null),
+                if (sendContext is RabbitMqSendContext rabbitMqContext)
+                    rabbitMqContext.BasicProperties.DeliveryMode = DeliveryModes.Transient;
+            },
             CancellationToken.None);
-
-        await channel.QueueDeclareAsync(
-            queue: _options.QueueName,
-            durable: true,
-            exclusive: false,
-            autoDelete: false,
-            arguments: null,
-            cancellationToken: CancellationToken.None);
-
-        return channel;
     }
 
     public async ValueTask DisposeAsync()
     {
         _queue.Writer.TryComplete();
         await _pump;
-
-        if (_channel is not null)
-            await _channel.DisposeAsync();
     }
 }

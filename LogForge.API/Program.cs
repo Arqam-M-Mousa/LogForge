@@ -9,7 +9,6 @@ var app = builder.Build();
 
 await app.Services.ApplyDatabaseMigrationsAsync();
 
-
 app.MapControllers();
 app.MapHealthChecks("/health");
 
