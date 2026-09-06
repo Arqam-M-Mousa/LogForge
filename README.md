@@ -172,7 +172,7 @@ Unfiltered time, service, and level aggregations use the minute rollup table to 
 
 Aggregations with message or attribute filters use the partitioned raw log table because those predicates cannot be answered by the service/level rollup.
 
-Aggregation results are cached in memory for five seconds with a maximum of 256 entries. Cache keys include all filter and range values. Randomized benchmark ranges generally produce cache misses by design.
+Aggregation results are cached in memory for five seconds with a maximum of 256 entries. Cache keys include all filter and range values.
 
 ## Retention
 
@@ -199,14 +199,14 @@ The Compose file applies the application and database benchmark limits:
 
 ## Measured Performance
 
-The measured report used Compose resource limits and a machine-speed factor of `0.622x` the reference machine.
+The measured report used Compose resource limits and a machine-speed factor of `0.663x` the reference machine.
 
 | Scenario | Throughput | Error rate | P95 latency | Result |
 | --- | ---: | ---: | ---: | --- |
-| Load | 14,999 logs/sec | 0% | 1.52 ms | Completed |
-| Stress | 20,999 logs/sec | 0% | 1.60 ms | Completed |
-| Spike | 15,374 logs/sec | 0% | 1.38 ms | Completed |
-| Breakpoint | 24,374 logs/sec | 0% | 3.63 ms | Completed |
+| Load | 14,999 logs/sec | 0% | 1.17 ms | Completed |
+| Stress | 20,999 logs/sec | 0% | 1.09 ms | Completed |
+| Spike | 15,375 logs/sec | 0% | 0.98 ms | Completed |
+| Breakpoint | 24,375 logs/sec | 0% | 2.42 ms | Completed |
 
 All four scenarios were offered at their target rate (up to 24,375 logs/sec in the breakpoint scenario) with zero dropped iterations and zero errors. None of the scenarios were generator-limited or service-limited: throughput matched the offered rate throughout.
 
@@ -231,7 +231,6 @@ All 15 correctness checks passed, including ingestion, filtering, pagination, ag
 - The in-memory aggregation cache has no cross-process sharing or in-flight single-flight deduplication.
 - Randomized aggregate ranges have low cache reuse.
 - Partition creation currently covers a finite migration-time window; a long-running deployment should proactively create future partitions.
-- The default partition can reduce partition-pruning benefits for timestamps outside the pre-created range.
 - Message substring queries use `ILIKE`; no trigram index is currently enabled in the migration.
 - `level`-only filters (without a `service` filter) have no dedicated index; they rely on partition pruning by timestamp and a sequential scan within each partition.
 - Attribute (`attr.<key>`) containment filters have no GIN index; they are evaluated row-by-row within whatever partitions/indexes narrow the query first.
@@ -239,7 +238,6 @@ All 15 correctness checks passed, including ingestion, filtering, pagination, ag
 ## Bottlenecks encountered
 
 - The initial ingestion path used MassTransit over RabbitMQ with publisher confirms awaited inline on the request path. Under concurrent load this added 100-300ms of publish latency per request, which starved the background consumer of CPU on the application's constrained core budget and left PostgreSQL idle during load while a growing backlog was worked off only after load stopped. Publishing was changed to fire-and-forget so the HTTP response no longer waits on a broker round trip.
-- MassTransit's batch-consumer pipeline must have both batch concurrency and endpoint concurrency configured. The current pipeline sets both to the configured consumer count and scales endpoint prefetch by that count, preserving the four-way parallel database writes and the 400-message total prefetch used by the raw implementation without returning to hand-rolled RabbitMQ dispatch.
 - Fire-and-forget publishing removes natural backpressure from the request path: every accepted request spawns a background publish task regardless of how many are already pending. This keeps the publisher simple and minimizes request latency, but a sustained burst beyond RabbitMQ's ability to keep up can accumulate pending tasks and exhaust the application's memory limit.
 - The initial aggregation design used only the raw log table, which caused slow queries for unfiltered aggregations. The aggregation design was changed to use a minute rollup table for unfiltered aggregations, which significantly improved performance.
 - The initial retention design used a single DELETE statement to remove expired logs, which caused long-running transactions and table bloat. The retention design was changed to drop fully expired partitions and delete remaining rows in batches, which improved performance and reduced bloat.
