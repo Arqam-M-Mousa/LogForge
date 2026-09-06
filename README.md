@@ -72,7 +72,7 @@ Invalid entries do not reject valid entries in the same batch. The response iden
 
 The endpoint returns `200` when at least one entry is accepted and `400` when the complete batch is rejected or the request body is invalid.
 
-Ingestion is asynchronous: a successful response means the validated batch was handed off for publishing to RabbitMQ, not that RabbitMQ has confirmed receipt. Publishing happens fire-and-forget in the background so the HTTP response isn't held up by a broker round trip; the background consumer then persists accepted messages to PostgreSQL and the rollup table. If a publish fails after the response has already been returned, it is logged rather than surfaced to the caller. A bounded in-flight limit on background publishes protects the application from unbounded memory growth if RabbitMQ falls behind; batches beyond that limit are dropped and logged instead of queued indefinitely.
+Ingestion is asynchronous: a successful response means the validated batch was handed off for publishing to RabbitMQ, not that RabbitMQ has confirmed receipt. Publishing uses MassTransit's default publish path in a fire-and-forget background task so the HTTP response isn't held up by a broker round trip; the background consumer then persists accepted messages to PostgreSQL and the rollup table. If a publish fails after the response has already been returned, it is logged rather than surfaced to the caller. There is no application-level in-flight limit, so sustained broker delays can accumulate background publish tasks and increase memory usage.
 
 ### `GET /logs`
 
@@ -192,11 +192,10 @@ Configuration is available in `LogForge.API/appsettings.json`:
 
 ## Resource Configuration
 
-The Compose file applies the required benchmark limits:
+The Compose file applies the application and database benchmark limits:
 
 - Application: `0.5 CPU`, `256 MB`
 - PostgreSQL: `1 CPU`, `1024 MB`
-- RabbitMQ: `1 CPU`, `512 MB`
 
 ## Measured Performance
 
@@ -227,7 +226,7 @@ All 15 correctness checks passed, including ingestion, filtering, pagination, ag
 
 - Ingestion is eventually consistent: HTTP acceptance occurs before the message is confirmed by RabbitMQ and before the background PostgreSQL write commits.
 - Publishing to RabbitMQ is fire-and-forget: a `200` response means the batch was accepted for publishing, not that RabbitMQ has acknowledged it. If the publish itself fails after the response is sent, the batch is lost and only logged, not retried or surfaced to the caller.
-- Background publishes are capped by an in-flight limit to bound memory; if RabbitMQ falls behind that limit, further batches are dropped and logged rather than queued indefinitely.
+- Background publishes have no in-flight cap or application queue; if RabbitMQ falls behind, pending fire-and-forget tasks can increase memory usage.
 - A failed batch write to PostgreSQL is retried three times and then logged; the batch is not requeued after all retries fail.
 - The in-memory aggregation cache has no cross-process sharing or in-flight single-flight deduplication.
 - Randomized aggregate ranges have low cache reuse.
@@ -241,7 +240,7 @@ All 15 correctness checks passed, including ingestion, filtering, pagination, ag
 
 - The initial ingestion path used MassTransit over RabbitMQ with publisher confirms awaited inline on the request path. Under concurrent load this added 100-300ms of publish latency per request, which starved the background consumer of CPU on the application's constrained core budget and left PostgreSQL idle during load while a growing backlog was worked off only after load stopped. Publishing was changed to fire-and-forget so the HTTP response no longer waits on a broker round trip.
 - MassTransit's batch-consumer pipeline must have both batch concurrency and endpoint concurrency configured. The current pipeline sets both to the configured consumer count and scales endpoint prefetch by that count, preserving the four-way parallel database writes and the 400-message total prefetch used by the raw implementation without returning to hand-rolled RabbitMQ dispatch.
-- Fire-and-forget publishing removes natural backpressure from the request path: every accepted request spawns a background publish task regardless of how many are already pending. Without a limit, a sustained burst beyond RabbitMQ's ability to keep up could accumulate pending publish tasks and exhaust the application's memory limit. A bounded in-flight counter caps concurrent background publishes; batches beyond the cap are dropped and logged rather than queued unboundedly.
+- Fire-and-forget publishing removes natural backpressure from the request path: every accepted request spawns a background publish task regardless of how many are already pending. This keeps the publisher simple and minimizes request latency, but a sustained burst beyond RabbitMQ's ability to keep up can accumulate pending tasks and exhaust the application's memory limit.
 - The initial aggregation design used only the raw log table, which caused slow queries for unfiltered aggregations. The aggregation design was changed to use a minute rollup table for unfiltered aggregations, which significantly improved performance.
 - The initial retention design used a single DELETE statement to remove expired logs, which caused long-running transactions and table bloat. The retention design was changed to drop fully expired partitions and delete remaining rows in batches, which improved performance and reduced bloat.
 - The initial log table design used a single primary key on the ID column, which caused slow queries for time-range queries. The log table design was changed to use a composite primary key on (Timestamp, Id), which improved query performance and allowed for partitioning by timestamp.
@@ -252,6 +251,6 @@ Implemented optimization features including:
 
 - Time-range partitioning
 - Minute rollups for unfiltered aggregation
-- Fire-and-forget, bounded asynchronous ingestion via MassTransit over RabbitMQ
+- Fire-and-forget asynchronous ingestion via MassTransit over RabbitMQ
 - In-memory aggregate-result caching
 - Partition-aware retention
