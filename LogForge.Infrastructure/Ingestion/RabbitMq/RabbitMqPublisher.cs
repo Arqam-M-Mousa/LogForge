@@ -14,7 +14,6 @@ public sealed class RabbitMqPublisher : ILogIngestionService, IAsyncDisposable
 
     private readonly IBus _bus;
     private readonly Uri _queueAddress;
-    private readonly RabbitMqOptions _options;
     private readonly ILogger<RabbitMqPublisher> _logger;
     private readonly Channel<List<LogEntry>> _queue;
     private readonly Task _pump;
@@ -26,9 +25,8 @@ public sealed class RabbitMqPublisher : ILogIngestionService, IAsyncDisposable
         ILogger<RabbitMqPublisher> logger)
     {
         _bus = bus;
-        _options = options.Value;
         _logger = logger;
-        _queueAddress = new Uri($"queue:{_options.QueueName}");
+        _queueAddress = new Uri($"queue:{options.Value.QueueName}");
         _queue = Channel.CreateBounded<List<LogEntry>>(new BoundedChannelOptions(MaxInFlightBatches)
         {
             SingleReader = true,
